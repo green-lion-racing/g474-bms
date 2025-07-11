@@ -51,6 +51,7 @@
 #include "main.h"
 #include "uartDMA.h"
 #include "bms_can.h"
+#include "math.h"
 
 
 typedef struct
@@ -91,7 +92,7 @@ typedef struct
 
     // From AUX measurement
     float v_segment     [TOTAL_AD68];
-    float temp_cell     [TOTAL_AD68][TOTAL_CELL];
+    float temp_cell     [TOTAL_AD68][TOTAL_TEMP];
     float temp_ic       [TOTAL_AD68];
 
     // flag stored in bits
@@ -276,12 +277,12 @@ void bms_printRawData(uint8_t data[TOTAL_IC][DATA_LEN], uint8_t cc[TOTAL_IC])
 {
     for (int ic = 0; ic < TOTAL_IC; ic++)
     {
-        printfDma("IC%d: ", ic+1);
+        printfDma("IC%d ", ic+1);
         for (int j = 0; j < 6; j++)             // For every byte recieved (6 bytes)
         {
             printfDma("0x%02X, ", data[ic][j]);    // Print each of the bytes
         }
-        printfDma("CC: %d |   ", cc[ic]);
+        printfDma("CC %d |   ", cc[ic]);
     }
     printfDma("\n\n");
 }
@@ -294,7 +295,7 @@ bool bms_checkRxFault(uint8_t data[TOTAL_IC][DATA_LEN], uint16_t pec[TOTAL_IC], 
 
     if (bms_checkRxPec(data, pec, cc, errorIndex))
     {
-        printfDma("WARNING! PEC ERROR - IC:");
+        printfDma("WARNING! PEC ERROR - IC");
         for(int ic = 0; ic < TOTAL_IC; ic++)
         {
             if (errorIndex[ic])
@@ -351,7 +352,7 @@ BMS_StatusTypeDef bms_readRegister(RegisterTypes regType)
         return BMS_ERR_COMMS;
     }
 
-    printfDma("%s: \n", title);
+    printfDma("%s \n", title);
     bms_printRawData(rxData, rxCc);
 
     return BMS_OK;
@@ -402,8 +403,35 @@ void bms_parseVoltage(uint8_t rawData[TOTAL_IC][DATA_LEN], float vArr[TOTAL_IC][
 }
 
 
-void bms_parseAuxVoltage(uint8_t const rawData[TOTAL_IC][DATA_LEN], float vArr[TOTAL_AD68][TOTAL_CELL], uint8_t cell_index, uint8_t muxIndex)
+void bms_parseAuxVoltage(uint8_t const rawData[TOTAL_IC][DATA_LEN], float vArr[TOTAL_AD68][TOTAL_TEMP], uint8_t cell_index)
 {
+
+
+    // Constants for the NTC thermistor
+    #define R_FIXED      10000.0       // Fixed resistor in ohms (10k)
+    #define R0           10000.0       // Thermistor resistance at T0
+    #define BETA         3650.0        // Beta constant for thermistor
+    #define T0_KELVIN    298.15        // Reference temperature in Kelvin (25°C)
+
+    // Supply voltage
+    #define V_SUPPLY     5.0           // Supply voltage in volts
+
+    // Function to convert voltage to temperature in Celsius
+    float voltage_to_temperature(float v_out) {
+        if (v_out <= 0.5 || v_out >= V_SUPPLY) {
+            return -273.15; // Invalid voltage; return absolute zero as error
+        }
+
+        // Calculate thermistor resistance
+        float r_thermistor = R_FIXED * v_out / (V_SUPPLY - v_out);
+
+        // Calculate temperature in Kelvin using the Beta equation
+        float temp_k = 1.0 / ((1.0 / T0_KELVIN) + (1.0 / BETA) * log(r_thermistor / R0));
+
+        // Convert to Celsius
+        return temp_k - 273.15;
+    }
+
     // Does not take care of 2950
 
     for (int ic = 0; ic < TOTAL_AD68; ic++)
@@ -418,14 +446,8 @@ void bms_parseAuxVoltage(uint8_t const rawData[TOTAL_IC][DATA_LEN], float vArr[T
 
         for (int c = cellArrIndex; c < (cellArrIndex + 3); c++)
         {
-            if (c == 3 || c == 4) continue; // Skip digital output pins
-            int ci = c;                     // compensate for skipped digital pins
-            if (c > 4)
-            {
-                ci -= 2;
-            }
+            vArr[ic][c] = voltage_to_temperature(*rawData[ic + TOTAL_AD29]);
 
-            vArr[ic][ci*2 + muxIndex] = *((int16_t *)(rawData[ic + TOTAL_AD29] + (c-cellArrIndex)*2)) * 0.00015 + 1.5;
 
             if (cell_index == 3)
             {
@@ -500,7 +522,7 @@ void bms_printVoltage(VoltageTypes voltageType)
         Error_Handler();
         break;
     }
-    printfDma("%s: \n", title);
+    printfDma("%s \n", title);
 
     printfDma("| IC |");
     for (int i = 0; i < TOTAL_CELL; i++)
@@ -529,15 +551,28 @@ void bms_printVoltage(VoltageTypes voltageType)
         }
         printfDma("\n");
     }
+
+    // for better serial monitor
+    for (int ic = 0; ic < TOTAL_AD68; ic++)
+        {
+            for (int c = 0; c < TOTAL_CELL; c++)
+            {
+                printfDma("IC%02dCELL%02d:%08.5f,", ic, c, vArr[ic][c]);
+            }
+        }
+    printfDma("\n");
 }
 
 
 void bms_printTemps(void)
 {
-    float (*tArr)[TOTAL_CELL] = ic_ad68.temp_cell;
+
+
+    printfDma("Temperature Measurement \n");
+    float (*tArr)[TOTAL_TEMP] = ic_ad68.temp_cell;
 
     printfDma("| IC |");
-    for (int i = 0; i < TOTAL_CELL; i++)
+    for (int i = 0; i < TOTAL_TEMP; i++)
     {
         printfDma("  %2d   |", i+1);
     }
@@ -547,12 +582,22 @@ void bms_printTemps(void)
     for (int ic = 0; ic < TOTAL_AD68; ic++)
     {
         printfDma("| %2d |", ic);
-        for (int c = 0; c < TOTAL_CELL; c++)
+        for (int c = 0; c < TOTAL_TEMP; c++)
         {
             printfDma("%6.1f |", tArr[ic][c]);
         }
         printfDma("  %.2f C  /  %.2f V \n", ic_ad68.temp_ic[ic], ic_ad68.v_segment[ic]);
     }
+
+    // for better serial monitor
+    for (int ic = 0; ic < TOTAL_AD68; ic++)
+        {
+            for (int c = 0; c < TOTAL_TEMP; c++)
+            {
+                printfDma("IC%02dTEMP%02d:%06.1f,", ic, c, tArr[ic][c]);
+            }
+        }
+    printfDma("\n");
 }
 
 
@@ -585,7 +630,7 @@ BMS_StatusTypeDef bms_readCellVoltage(VoltageTypes voltageType)
 }
 
 
-uint8_t bms_getAuxVoltage(uint8_t muxIndex)
+uint8_t bms_getAuxVoltage()
 {
     uint8_t* cmdList[] = {RDAUXA, RDAUXB, RDAUXC, RDAUXD, RDSTATA};
 
@@ -596,61 +641,14 @@ uint8_t bms_getAuxVoltage(uint8_t muxIndex)
         {
             return -1;
         }
-        bms_parseAuxVoltage(rxData, ic_ad68.v_cell[VOLTAGE_TEMP], i, muxIndex);
+        bms_parseAuxVoltage(rxData, ic_ad68.temp_cell, i);
     }
     return 0;
 }
 
 
-float static convertCellTemp(float cellVoltage)
-{
-    // From datasheet
-    static const float tempValues[]    = { -40,  -35,  -30,  -25,  -20,  -15,  -10,   -5,    0,    5,   10,   15,   20,   25,   30,   35,   40,   45,   50,   55,   60,   65,   70,   75,   80,   85,   90,   95,  100,  105,  110,  115,  120};
-    static const float voltageValues[] = {2.44, 2.42, 2.40, 2.38, 2.35, 2.32, 2.27, 2.23, 2.17, 2.11, 2.05, 1.99, 1.92, 1.86, 1.80, 1.74, 1.68, 1.63, 1.59, 1.55, 1.51, 1.48, 1.45, 1.43, 1.40, 1.38, 1.37, 1.35, 1.34, 1.33, 1.32, 1.31, 1.30};
-    static const int   numDataPoints   = sizeof(tempValues) / sizeof(tempValues[0]);
-
-    // Check if in range
-    if (cellVoltage > 2.44 || cellVoltage < 1.30)
-    {
-        // Voltage out of range
-        return 888.0;
-    }
-
-    int idx;
-    for (idx = 0; idx < numDataPoints - 1; idx++)
-    {
-        if (cellVoltage > voltageValues[idx + 1]) break;
-    }
-
-    float x1 = voltageValues[idx];
-    float x2 = voltageValues[idx + 1];
-    float y1 = tempValues[idx];
-    float y2 = tempValues[idx + 1];
-
-    return y1 + (cellVoltage - x1) * (y2 - y1) / (x2 - x1);
-}
-
-
-void bms_parseTemps(void)
-{
-    for (int ic = 0; ic < TOTAL_AD68; ic++)
-    {
-        for (int c = 0; c < TOTAL_CELL; c++)
-        {
-            ic_ad68.temp_cell[ic][c] = convertCellTemp(ic_ad68.v_cell[VOLTAGE_TEMP][ic][c]);
-        }
-    }
-}
-
-
 BMS_StatusTypeDef bms_getAuxMeasurement(void)
 {
-    /*
-     *  GPO4 = Mux switch
-     *  GPO5 = 3V3 Converter Enable
-     *
-     *  20ms start-up time based on TEC 2-4810WI datasheet
-     */
 
     ADAX.OW   = 0b0;
     ADAX.CH   = 0b0000;
@@ -662,24 +660,11 @@ BMS_StatusTypeDef bms_getAuxMeasurement(void)
 
     bms_transmitCmd((uint8_t *)&ADAX);
     bms_transmitPoll(PLAUX1);
-    if (bms_getAuxVoltage(1))           // Has to be 1 first due to the mux switching
+    if (bms_getAuxVoltage())
     {
         return BMS_ERR_COMMS;
     }
-    bms68_setGpo45(0b00);           // Switch to the other Mux Channel
-    bms_delayMsActive(1);           // Small delay for switching
 
-    bms_transmitCmd((uint8_t *)&ADAX);
-    bms_transmitPoll(PLAUX1);
-    if (bms_getAuxVoltage(0))
-    {
-        return BMS_ERR_COMMS;
-    }
-    bms68_setGpo45(0b11);           // Reset to default
-
-    bms_parseTemps();
-    bms_calculateStats(VOLTAGE_TEMP);
-    bms_printVoltage(VOLTAGE_TEMP);
     bms_printTemps();
 
 //    uint32_t time = bms_getTimCount();
@@ -815,7 +800,7 @@ void bms_startDischarge(float dischargeThreshold)
         {
             if (ic_ad68.v_cell[dischargeVoltageType][ic][c] > dischargeThreshold)
             {
-                printfDma("DISCHARGE: IC %d, CELL %d, DC %d \n", ic+1, c+1, dutyCycle);
+                printfDma("DISCHARGE IC %d, CELL %d, DC %d \n", ic+1, c+1, dutyCycle);
                 BIT_SET(ic_ad68.isDischarging[ic], c);
                 bms_setPwm(ic, c, dutyCycle);
             }
@@ -883,11 +868,11 @@ BMS_StatusTypeDef bms29_readVB(void)
 
         ic_ad29.vb1 = *((int16_t *)(rxData[0] + 2)) *  0.000100 * 396.604395604;
         ic_ad29.vb2 = *((int16_t *)(rxData[0] + 4)) * -0.000085 * 751;
-        printfDma("Pack Voltage: %fV, %fV  \n", ic_ad29.vb1, ic_ad29.vb2);
+        printfDma("Pack Voltage %fV, %fV  \n", ic_ad29.vb1, ic_ad29.vb2);
     }
     else
     {
-        printfDma("Pack Voltage: (AD29 Disabled!) \n");
+        printfDma("Pack Voltage (AD29 Disabled!) \n");
     }
     return BMS_OK;
 }
@@ -920,11 +905,11 @@ BMS_StatusTypeDef bms29_readCurrent(void)
         ic_ad29.current1 = ((float)i1v / 1000000.0f) / SHUNT_RESISTANCE;
         ic_ad29.current2 = ((float)i2v / 1000000.0f) / SHUNT_RESISTANCE;
 
-        printfDma("Current: %fA, %fA  \n", ic_ad29.current1 , ic_ad29.current2);
+        printfDma("Current %fA, %fA  \n", ic_ad29.current1 , ic_ad29.current2);
     }
     else
     {
-        printfDma("Current: (AD29 Disabled!) \n");
+        printfDma("Current (AD29 Disabled!) \n");
     }
     return BMS_OK;
 }
@@ -1103,7 +1088,7 @@ BMS_StatusTypeDef bms_checkStatus(void)
     const float MIN_CURRENT = -MAX_CURRENT;
 
     const float MAX_VOLTAGE = 4.2;
-    const float MIN_VOLTAGE = 3.3;
+    const float MIN_VOLTAGE = 2.5;
 
     const float MAX_IC_VOLTAGE = 4.2 * 16;
     const float MIN_IC_VOLTAGE = 3.0 * 16;
@@ -1122,33 +1107,33 @@ BMS_StatusTypeDef bms_checkStatus(void)
         float packVoltage = ic_ad29.vb1;        // TODO: Figure out how to combine 2 values
         float packCurrent = ic_ad29.current1;
 
-        if (packVoltage > MAX_PACK_VOLTAGE)
+        /*if (packVoltage > MAX_PACK_VOLTAGE)
         {
-            printfDma("Pack Overvoltage Detected: %f V \n", packVoltage);
+            printfDma("Pack Overvoltage Detected %f V \n", packVoltage);
             ic_common.isFaultDetected[0] = true;
             status = BMS_ERR_FAULT;
         }
 
         if (packVoltage < MIN_PACK_VOLTAGE)
         {
-            printfDma("Pack Undervoltage Detected: %f V \n", packVoltage);
+            printfDma("Pack Undervoltage Detected %f V \n", packVoltage);
             ic_common.isFaultDetected[0] = true;
             status = BMS_ERR_FAULT;
-        }
+        }*/
 
-        if (packCurrent > MAX_CURRENT)
+        /*if (packCurrent > MAX_CURRENT)
         {
-            printfDma("Pack OverTemp Detected: %f C \n", packCurrent);
+            printfDma("Pack OverTemp Detected %f C \n", packCurrent);
             ic_common.isFaultDetected[0] = true;
             status = BMS_ERR_FAULT;
         }
 
         if (packCurrent < MIN_CURRENT)
         {
-            printfDma("Pack UnderTemp Detected: %f C \n", packCurrent);
+            printfDma("Pack UnderTemp Detected %f C \n", packCurrent);
             ic_common.isFaultDetected[0] = true;
             status = BMS_ERR_FAULT;
-        }
+        }*/
 
         if (status == BMS_OK)
         {
@@ -1168,28 +1153,28 @@ BMS_StatusTypeDef bms_checkStatus(void)
 
             if (cellVoltage > MAX_VOLTAGE)
             {
-                printfDma("Overvoltage Detected: SEG %d, CELL %d, %f \n", ic+1, c+1, cellVoltage);
+                printfDma("Overvoltage Detected SEG %d, CELL %d, %f \n", ic+1, c+1, cellVoltage);
                 BIT_SET(ic_ad68.isCellFaultDetected[ic], c);
                 status = BMS_ERR_FAULT;
             }
 
             if (cellVoltage < MIN_VOLTAGE)
             {
-                printfDma("Undervoltage Detected: SEG %d, CELL %d, %f \n", ic+1, c+1, cellVoltage);
+                printfDma("Undervoltage Detected SEG %d, CELL %d, %f \n", ic+1, c+1, cellVoltage);
                 BIT_SET(ic_ad68.isCellFaultDetected[ic], c);
                 status = BMS_ERR_FAULT;
             }
 
-            if (cellTemp > MAX_TEMP)
+            /*if (cellTemp > MAX_TEMP)
             {
-                printfDma("OverTemp Detected: SEG %d, CELL %d, %f \n", ic+1, c+1, cellTemp);
+                printfDma("OverTemp Detected SEG %d, CELL %d, %f \n", ic+1, c+1, cellTemp);
                 BIT_SET(ic_ad68.isCellFaultDetected[ic], c);
                 status = BMS_ERR_FAULT;
             }
 
             if (cellTemp < MIN_TEMP)
             {
-                printfDma("UnderTemp Detected: SEG %d, CELL %d, %f \n", ic+1, c+1, cellTemp);
+                printfDma("UnderTemp Detected SEG %d, CELL %d, %f \n", ic+1, c+1, cellTemp);
                 BIT_SET(ic_ad68.isCellFaultDetected[ic], c);
                 status = BMS_ERR_FAULT;
             }
@@ -1197,7 +1182,7 @@ BMS_StatusTypeDef bms_checkStatus(void)
             if (status == BMS_OK)
             {
                 BIT_CLEAR(ic_ad68.isCellFaultDetected[ic], c);
-            }
+            }*/
 
             returnStatus |= status;
             status = BMS_OK;
@@ -1206,33 +1191,33 @@ BMS_StatusTypeDef bms_checkStatus(void)
         float icVoltage = ic_ad68.v_segment[ic];
         float icTemp = ic_ad68.temp_ic[ic];
 
-        if (icVoltage > MAX_IC_VOLTAGE)
+        /*if (icVoltage > MAX_IC_VOLTAGE)
         {
-            printfDma("IC Overvoltage Detected: SEG %d, %f \n", ic+1, icVoltage);
+            printfDma("IC Overvoltage Detected SEG %d, %f \n", ic+1, icVoltage);
             ic_common.isFaultDetected[ic + TOTAL_AD29] = true;
             status = BMS_ERR_FAULT;
         }
 
         if (icVoltage < MIN_IC_VOLTAGE)
         {
-            printfDma("IC Undervoltage Detected: SEG %d, %f \n", ic+1, icVoltage);
+            printfDma("IC Undervoltage Detected SEG %d, %f \n", ic+1, icVoltage);
             ic_common.isFaultDetected[ic + TOTAL_AD29] = true;
             status = BMS_ERR_FAULT;
         }
 
         if (icTemp > MAX_IC_TEMP)
         {
-            printfDma("IC OverTemp Detected: SEG %d, %f \n", ic+1, icTemp);
+            printfDma("IC OverTemp Detected SEG %d, %f \n", ic+1, icTemp);
             ic_common.isFaultDetected[ic + TOTAL_AD29] = true;
             status = BMS_ERR_FAULT;
         }
 
         if (icTemp < MIN_IC_TEMP)
         {
-            printfDma("IC UnderTemp Detected: SEG %d, %f \n", ic+1, icTemp);
+            printfDma("IC UnderTemp Detected SEG %d, %f \n", ic+1, icTemp);
             ic_common.isFaultDetected[ic + TOTAL_AD29] = true;
             status = BMS_ERR_FAULT;
-        }
+        }*/
 
         if (status == BMS_OK)
         {
@@ -1253,7 +1238,7 @@ BMS_StatusTypeDef BMS_ProgramLoop(void)
     BMS_StatusTypeDef status;
     if ((status = bms_readCellVoltage(VOLTAGE_C_FIL)))  return status;
     bms_wakeupChain();
-    if ((status = bms_getAuxMeasurement())) return status; // around 40 ms
+    if ((status = bms_getAuxMeasurement())) return status;
 
     bms_wakeupChain();
     if ((status = bms29_readVB()))      return status;
@@ -1264,8 +1249,9 @@ BMS_StatusTypeDef BMS_ProgramLoop(void)
 
     // Only balancing/charging if status is OK
     status = bms_checkStatus();
+    //status = BMS_ERR_FAULT;
 
-    bms_wakeupChain();
+    /*bms_wakeupChain();
     if (enableBalancing && (status == BMS_OK))
     {
         bms_startBalancing(balancingThreshold);
@@ -1283,7 +1269,7 @@ BMS_StatusTypeDef BMS_ProgramLoop(void)
     }
 
     bms_wakeupChain();
-    newDataReady = true;
+    newDataReady = true;*/
     return status;
 }
 
@@ -1306,7 +1292,7 @@ void BMS_ToggleBalancing(void)
 void BMS_ToggleCharging(void)
 {
     enableCharging = !enableCharging;
-    printfDma("Charger Status: &d\n", enableCharging);
+    printfDma("Charger Status &d\n", enableCharging);
 }
 
 bool BMS_CheckNewDataReady(void)

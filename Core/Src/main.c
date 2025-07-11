@@ -166,6 +166,7 @@ int main(void)
 
     while (1)
     {
+
         timeStart = getRuntimeMs();
 
         // Init BMS
@@ -365,9 +366,9 @@ void BMS_FaultHandler(BMS_StatusTypeDef status)
     default:
         break;
 
-    bms_stopDischarge();
+    /*bms_stopDischarge();
     BMS_EnableBalancing(false);
-    BMS_EnableCharging(false);
+    BMS_EnableCharging(false);*/
 
     }
 }
