@@ -208,7 +208,7 @@ int main(void)
         timeDiff = HAL_GetTick() - timeStart;
         if (DEBUG_SERIAL_LOOP_TIME)
         {
-            printfDma("\nRuntime: %ld ms, LoopTime: %ld ms \n\n", HAL_GetTick(), timeDiff);
+            printfDma("\nRuntime %ld ms, LoopTime %ld ms \n\n", HAL_GetTick(), timeDiff);
         }
 
         HAL_Delay(MAIN_LOOP_DELAY);

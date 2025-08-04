@@ -98,6 +98,7 @@ typedef struct
     // flag stored in bits
     uint16_t isDischarging          [TOTAL_AD68];         // isDischarging Flag
     uint16_t isCellFaultDetected    [TOTAL_AD68];
+    uint16_t isTempFaultDetected    [TOTAL_AD68];
 
 } Ic_ad68;
 
@@ -131,17 +132,16 @@ uint32_t BMS_StatusFlags = BMS_ERR_COMMS;          // Stores flags in bits
 
 ChargerConfiguration chargerConfig = {
         .max_current = 1,
-        .target_voltage = 450,
+        .target_voltage = 520,
         .disable_charging = 1,
 };
 
 static const float balancingThreshold = 0.020; // Volts
 
-static const bool DEBUG_SERIAL_VOLTAGE_ENABLED = false;
-static const bool DEBUG_SERIAL_AUX_ENABLED = false;
-static const bool DEBUG_SERIAL_MASTER_MEASUREMENTS = false;
+static const bool DEBUG_SERIAL_VOLTAGE_ENABLED = true;
+static const bool DEBUG_SERIAL_MASTER_MEASUREMENTS = true;
 
-volatile bool enableBalancing = true;
+volatile bool enableBalancing = false;
 
 
 void bms_resetConfig(void)
@@ -419,8 +419,6 @@ void bms_parseVoltage(uint8_t rawData[TOTAL_IC][DATA_LEN], float vArr[TOTAL_IC][
 
 void bms_parseAuxVoltage(uint8_t const rawData[TOTAL_IC][DATA_LEN], float vArr[TOTAL_AD68][TOTAL_TEMP], uint8_t cell_index)
 {
-
-
     // Constants for the NTC thermistor
     #define R_FIXED      10000.0       // Fixed resistor in ohms (10k)
     #define R0           10000.0       // Thermistor resistance at T0
@@ -460,7 +458,7 @@ void bms_parseAuxVoltage(uint8_t const rawData[TOTAL_IC][DATA_LEN], float vArr[T
 
         for (int c = cellArrIndex; c < (cellArrIndex + 3); c++)
         {
-            vArr[ic][c] = voltage_to_temperature(*rawData[ic + TOTAL_AD29]);
+            vArr[ic][c] = voltage_to_temperature(*((int16_t *)(rawData[ic + TOTAL_AD29] + (c-cellArrIndex)*2)) * 0.00015 + 1.5);
 
 
             if (cell_index == 3)
@@ -609,8 +607,6 @@ void bms_printVoltage(VoltageTypes voltageType)
 
 void bms_printTemps(void)
 {
-
-
     printfDma("Temperature Measurement \n");
     float (*tArr)[TOTAL_TEMP] = ic_ad68.temp_cell;
 
@@ -716,7 +712,7 @@ BMS_StatusTypeDef bms_getAuxMeasurement(void)
         return BMS_ERR_COMMS;
     }
     bms68_setGpo45(0b11);           // Reset to default
-    bms_printTemps();
+    if (DEBUG_SERIAL_AUX_ENABLED) bms_printTemps();
 
     //bms_parseTemps();
     //bms_calculateStats(VOLTAGE_TEMP);
@@ -725,7 +721,7 @@ BMS_StatusTypeDef bms_getAuxMeasurement(void)
 
 //    uint32_t time = bms_getTimCount();
 //    bms_stopTimer();
-//    printfDma("PT: %ld us\n", time);
+//    printfDma("PT %ld us\n", time);
 
     return BMS_OK;
 }
@@ -862,7 +858,7 @@ void bms_startDischarge(float dischargeThreshold)
     }
 
     // for testing -> enables discharge for cell 1
-//    printfDma("DISCHARGE: IC 1, CELL 1 \n");
+//    printfDma("DISCHARGE IC 1, CELL 1 \n");
 //    ic_ad68.pwma[0].pwm1 = 0b1111;
 
     bms_writeRegister(REG_CONFIG_B);             // Send the DCTO Timer config
@@ -1136,8 +1132,8 @@ void BMS_SetCommsFault(bool state)
 
 BMS_StatusTypeDef BMS_UpdateStatusFlags(void)
 {
-    const float MAX_PACK_VOLTAGE = 4.2 * 16 * 7;
-    const float MIN_PACK_VOLTAGE = 3.0 * 16 * 7;
+    const float MAX_PACK_VOLTAGE = 4.2 * 12 * 10;
+    const float MIN_PACK_VOLTAGE = 3.0 * 12 * 10;
 
     const float MAX_CURRENT = 10.0;
     const float MIN_CURRENT = -MAX_CURRENT;
@@ -1145,8 +1141,8 @@ BMS_StatusTypeDef BMS_UpdateStatusFlags(void)
     const float MAX_VOLTAGE = 4.2;
     const float MIN_VOLTAGE = 2.5;
 
-    const float MAX_IC_VOLTAGE = 4.2 * 16;
-    const float MIN_IC_VOLTAGE = 3.0 * 16;
+    const float MAX_IC_VOLTAGE = 4.2 * 12;
+    const float MIN_IC_VOLTAGE = 3.0 * 12;
 
     const float MAX_TEMP = 60;
     const float MIN_TEMP = 0;
@@ -1205,23 +1201,15 @@ BMS_StatusTypeDef BMS_UpdateStatusFlags(void)
 
     for (int ic = 0; ic < TOTAL_AD68; ic++)
     {
-        for (int c = 0; c < TOTAL_CELL; c++)
+        for (int c = 0; c < TOTAL_CELL - 4; c++)
         {
             float cellVoltage = ic_ad68.v_cell[dischargeVoltageType][ic][c];
-            float cellTemp = ic_ad68.temp_cell[ic][c];
 
             if (cellVoltage > MAX_VOLTAGE || cellVoltage < MIN_VOLTAGE)
             {
                 printfDma("CELL VOLTAGE FAULT SEG %d, CELL %d, %f \n", ic+1, c+1, cellVoltage);
                 BIT_SET(ic_ad68.isCellFaultDetected[ic], c);
                 status |= BMS_ERR_VOLTAGE;
-            }
-
-            if (cellTemp > MAX_TEMP || cellTemp < MIN_TEMP)
-            {
-                printfDma("CELL TEMP FAULT SEG %d, CELL %d, %f \n", ic+1, c+1, cellTemp);
-                BIT_SET(ic_ad68.isCellFaultDetected[ic], c);
-                status |= BMS_ERR_TEMP;
             }
 
             if (status == BMS_OK)
@@ -1233,19 +1221,39 @@ BMS_StatusTypeDef BMS_UpdateStatusFlags(void)
             status = BMS_OK;
         }
 
+        for (int c = 0; c < TOTAL_TEMP; c++)
+        {
+            float cellTemp = ic_ad68.temp_cell[ic][c];
+
+            if (cellTemp > MAX_TEMP || cellTemp < MIN_TEMP)
+            {
+                printfDma("CELL TEMP FAULT SEG %d, CELL %d, %f \n", ic+1, c+1, cellTemp);
+                BIT_SET(ic_ad68.isTempFaultDetected[ic], c);
+                status |= BMS_ERR_TEMP;
+            }
+
+            if (status == BMS_OK)
+            {
+                BIT_CLEAR(ic_ad68.isTempFaultDetected[ic], c);
+            }
+
+            returnStatus |= status;
+            status = BMS_OK;
+        }
+
         float icVoltage = ic_ad68.v_segment[ic];
         float icTemp = ic_ad68.temp_ic[ic];
 
         if (icVoltage > MAX_IC_VOLTAGE || icVoltage < MIN_IC_VOLTAGE)
         {
-            printfDma("IC VOLTAGE FAULT: SEG %d, %f \n", ic+1, icVoltage);
+            printfDma("IC VOLTAGE FAULT SEG %d, %f \n", ic+1, icVoltage);
             ic_common.isFaultDetected[ic + TOTAL_AD29] = true;
             status |= BMS_ERR_VOLTAGE;
         }
 
         if (icTemp > MAX_IC_TEMP || icTemp < MIN_IC_TEMP)
         {
-            printfDma("IC TEMP FAULT: SEG %d, %f \n", ic+1, icTemp);
+            printfDma("IC TEMP FAULT SEG %d, %f \n", ic+1, icTemp);
             ic_common.isFaultDetected[ic + TOTAL_AD29] = true;
             status |= BMS_ERR_TEMP;
         }
@@ -1268,8 +1276,8 @@ BMS_StatusTypeDef BMS_UpdateStatusFlags(void)
 BMS_StatusTypeDef BMS_ProgramLoop(void)
 {
     BMS_StatusTypeDef status;
-//    bms_wakeupChain();
-//    if ((status = bms_readCellVoltage(VOLTAGE_C_FIL)))  return status;
+    bms_wakeupChain();
+    if ((status = bms_readCellVoltage(VOLTAGE_C_FIL)))  return status;
     bms_wakeupChain();
     if ((status = bms_getAuxMeasurement())) return status;
 

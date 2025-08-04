@@ -66,7 +66,7 @@ extern FDCAN_HandleTypeDef hfdcan2;
 /* USER CODE BEGIN EM */
 #define TOTAL_CELL      16
 #define TOTAL_TEMP      10
-#define TOTAL_AD68      2
+#define TOTAL_AD68      8
 #define TOTAL_AD29      0       // SHOULD ONLY BE EITHER 0 OR 1
 
 #define TOTAL_IC        (TOTAL_AD29 + TOTAL_AD68)
