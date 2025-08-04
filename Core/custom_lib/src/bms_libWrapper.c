@@ -139,6 +139,7 @@ ChargerConfiguration chargerConfig = {
 static const float balancingThreshold = 0.020; // Volts
 
 static const bool DEBUG_SERIAL_VOLTAGE_ENABLED = true;
+static const bool DEBUG_SERIAL_AUX_ENABLED = true;
 static const bool DEBUG_SERIAL_MASTER_MEASUREMENTS = true;
 
 volatile bool enableBalancing = false;
@@ -397,7 +398,6 @@ void bms_startAdcvCont(bool enableRedundant)
 
 void bms_parseVoltage(uint8_t rawData[TOTAL_IC][DATA_LEN], float vArr[TOTAL_IC][TOTAL_CELL], uint8_t register_index)
 {
-    // Does not take care of 2950
     // TODO: Read master register as well
 
     uint8_t cell_index = (register_index * 3);
@@ -406,6 +406,11 @@ void bms_parseVoltage(uint8_t rawData[TOTAL_IC][DATA_LEN], float vArr[TOTAL_IC][
     {
         for (int c = cell_index; c < (cell_index + 3); c++)
         {
+            // Don't read cells out of range
+            if (c >= TOTAL_CELL) {
+                break;
+            }
+
             vArr[ic][c] = *((int16_t *)(rawData[ic + TOTAL_AD29] + (c - cell_index)*2)) * 0.00015 + 1.5;
 
             if (register_index == 5) // Skip last Register since the last register only stores 1 cell
@@ -420,13 +425,13 @@ void bms_parseVoltage(uint8_t rawData[TOTAL_IC][DATA_LEN], float vArr[TOTAL_IC][
 void bms_parseAuxVoltage(uint8_t const rawData[TOTAL_IC][DATA_LEN], float vArr[TOTAL_AD68][TOTAL_TEMP], uint8_t cell_index)
 {
     // Constants for the NTC thermistor
-    #define R_FIXED      10000.0       // Fixed resistor in ohms (10k)
-    #define R0           10000.0       // Thermistor resistance at T0
-    #define BETA         3650.0        // Beta constant for thermistor
-    #define T0_KELVIN    298.15        // Reference temperature in Kelvin (25°C)
+    float R_FIXED     = 10000.0;       // Fixed resistor in ohms (10k)
+    float R0          = 10000.0;       // Thermistor resistance at T0
+    float BETA        = 3650.0;        // Beta constant for thermistor
+    float T0_KELVIN   = 298.15;        // Reference temperature in Kelvin (25°C)
 
     // Supply voltage
-    #define V_SUPPLY     5.0           // Supply voltage in volts
+    float V_SUPPLY    = 3.0;           // Supply voltage in volts
 
     // Function to convert voltage to temperature in Celsius
     float voltage_to_temperature(float v_out) {
@@ -600,6 +605,7 @@ void bms_printVoltage(VoltageTypes voltageType)
             {
                 printfDma("IC%02dCELL%02d:%08.5f,", ic, c, vArr[ic][c]);
             }
+            printfDma("\n");
         }
     printfDma("\n");
 }
@@ -635,6 +641,7 @@ void bms_printTemps(void)
             {
                 printfDma("IC%02dTEMP%02d:%06.1f,", ic, c, tArr[ic][c]);
             }
+            printfDma("\n");
         }
     printfDma("\n");
 }
@@ -1201,7 +1208,7 @@ BMS_StatusTypeDef BMS_UpdateStatusFlags(void)
 
     for (int ic = 0; ic < TOTAL_AD68; ic++)
     {
-        for (int c = 0; c < TOTAL_CELL - 4; c++)
+        for (int c = 0; c < TOTAL_CELL; c++)
         {
             float cellVoltage = ic_ad68.v_cell[dischargeVoltageType][ic][c];
 
@@ -1285,7 +1292,7 @@ BMS_StatusTypeDef BMS_ProgramLoop(void)
     if ((status = bms29_readVB()))      return status;
     bms_wakeupChain();
     if ((status = bms29_readCurrent())) return status;
-    bms_wakeupChain();
+    /*bms_wakeupChain();
     if ((status = bms_balancingMeasureVoltage()))       return status;
 
     // Only balancing/charging if status is OK
@@ -1295,7 +1302,7 @@ BMS_StatusTypeDef BMS_ProgramLoop(void)
     {
         bms_wakeupChain();
         bms_startBalancing(balancingThreshold);
-    }
+    }*/
 
     bms_wakeupChain();
     return status;

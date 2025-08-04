@@ -393,14 +393,14 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
         printfDma("Blue Button pressed\n");
         break;
 
-    case CHRGR_BTTN_Pin:        // Charger Button
+    /*case CHRGR_BTTN_Pin:        // Charger Button
         // Debounce check
         if (currentTime - lastDebounceTime_CHRGR_BTTN < DEBOUNCE_DELAY) break;
         lastDebounceTime_CHRGR_BTTN = currentTime;
 
         printfDma("Charger Button pressed\n");
         BMS_ChargingButtonLogic();
-        break;
+        break;*/
 
     default:
         break;
