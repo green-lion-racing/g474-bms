@@ -41,9 +41,11 @@ extern "C" {
 /* USER CODE BEGIN ET */
 
 typedef enum {
-    BMS_OK = 0,
-    BMS_ERR_COMMS = -1,
-    BMS_ERR_FAULT = 1,
+    BMS_OK          = 0x00,
+    BMS_ERR_COMMS   = 0x01,
+    BMS_ERR_VOLTAGE = 0x02,
+    BMS_ERR_TEMP    = 0x04,
+    BMS_ERR_CURRENT = 0x08,
 } BMS_StatusTypeDef;
 
 
@@ -62,7 +64,7 @@ extern FDCAN_HandleTypeDef hfdcan2;
 
 /* Exported macro ------------------------------------------------------------*/
 /* USER CODE BEGIN EM */
-#define TOTAL_CELL      12
+#define TOTAL_CELL      16
 #define TOTAL_TEMP      10
 #define TOTAL_AD68      2
 #define TOTAL_AD29      0       // SHOULD ONLY BE EITHER 0 OR 1
@@ -73,7 +75,6 @@ extern FDCAN_HandleTypeDef hfdcan2;
 #define BIT_CLEAR(byte,nbit) ((byte) &= ~(UINT32_C(1) << (nbit)))
 #define BIT_CHECK(byte,nbit) ((byte) &   (UINT32_C(1) << (nbit)))
 #define BIT_FLIP(byte,nbit)  ((byte) ^=  (UINT32_C(1) << (nbit)))
-
 
 /* USER CODE END EM */
 
@@ -103,8 +104,8 @@ void Error_Handler(void);
 #define CHRGR_BTTN_EXTI_IRQn EXTI0_IRQn
 #define FAULT_CTRL_Pin GPIO_PIN_1
 #define FAULT_CTRL_GPIO_Port GPIOC
-#define OC1_IT_Pin GPIO_PIN_2
-#define OC1_IT_GPIO_Port GPIOC
+#define SDC_IN_Pin GPIO_PIN_2
+#define SDC_IN_GPIO_Port GPIOC
 #define OC2_IT_Pin GPIO_PIN_3
 #define OC2_IT_GPIO_Port GPIOC
 #define LPUART1_TX_Pin GPIO_PIN_2

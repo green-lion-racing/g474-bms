@@ -106,6 +106,11 @@ typedef struct
 {
     bool isFaultDetected    [TOTAL_IC];
     bool isCommsError       [TOTAL_IC];
+
+    // Pack status
+    float v_pack_total;
+    float v_pack_min;
+    float v_pack_max;
 } Ic_common;
 
 
@@ -118,16 +123,25 @@ uint8_t  rxData[TOTAL_IC][DATA_LEN];
 uint16_t rxPec[TOTAL_IC];
 uint8_t  rxCc[TOTAL_IC];
 
-VoltageTypes dischargeVoltageType = VOLTAGE_S;
-
-#define CAN_BUFFER_LEN (7 * 16 + 32)                // TODO: Calculate accurate buffer size
 CanTxMsg canTxBuffer[CAN_BUFFER_LEN] = {0};
 
-const float balancingThreshold = 0.010; // Volts
+VoltageTypes dischargeVoltageType = VOLTAGE_S;
 
-volatile bool enableBalancing = false;
-volatile bool enableCharging = false;
-volatile bool newDataReady = false;
+uint32_t BMS_StatusFlags = BMS_ERR_COMMS;          // Stores flags in bits
+
+ChargerConfiguration chargerConfig = {
+        .max_current = 1,
+        .target_voltage = 450,
+        .disable_charging = 1,
+};
+
+static const float balancingThreshold = 0.020; // Volts
+
+static const bool DEBUG_SERIAL_VOLTAGE_ENABLED = false;
+static const bool DEBUG_SERIAL_AUX_ENABLED = false;
+static const bool DEBUG_SERIAL_MASTER_MEASUREMENTS = false;
+
+volatile bool enableBalancing = true;
 
 
 void bms_resetConfig(void)
@@ -461,9 +475,13 @@ void bms_parseAuxVoltage(uint8_t const rawData[TOTAL_IC][DATA_LEN], float vArr[T
 
 void bms_calculateStats(VoltageTypes voltageType)
 {
+    float total_voltage = 0;
+    float pack_min =  999.0;
+    float pack_max = -999.0;
+
     for (int ic = 0; ic < TOTAL_AD68; ic++)
     {
-        float min = 999.0;
+        float min =  999.0;
         float max = -999.0;
         float sum = 0;
 
@@ -479,8 +497,17 @@ void bms_calculateStats(VoltageTypes voltageType)
             {
                 min = voltage;
             }
+            if (voltage > pack_max)
+            {
+                pack_max = voltage;
+            }
+            if (voltage < pack_min)
+            {
+                pack_min = voltage;
+            }
         }
 
+        total_voltage += sum;
         ic_ad68.v_cell_min  [voltageType][ic] = min;
         ic_ad68.v_cell_max  [voltageType][ic] = max;
         ic_ad68.v_cell_sum  [voltageType][ic] = sum;
@@ -490,6 +517,22 @@ void bms_calculateStats(VoltageTypes voltageType)
         for (int c = 0; c < TOTAL_CELL; c++)
         {
             ic_ad68.v_cell_diff[voltageType][ic][c] = ic_ad68.v_cell[voltageType][ic][c] - min;
+        }
+    }
+
+    if (voltageType == dischargeVoltageType)
+    {
+        ic_common.v_pack_total = total_voltage;
+        ic_common.v_pack_min = pack_min;
+        ic_common.v_pack_max = pack_max;
+    }
+
+    // Calculate voltage diff from the lowest voltage cell
+    for (int ic = 0; ic < TOTAL_AD68; ic++)
+    {
+        for (int c = 0; c < TOTAL_CELL; c++)
+        {
+            ic_ad68.v_cell_diff[voltageType][ic][c] = ic_ad68.v_cell[voltageType][ic][c] - pack_min;
         }
     }
 }
@@ -624,7 +667,8 @@ BMS_StatusTypeDef bms_readCellVoltage(VoltageTypes voltageType)
     }
 
     bms_calculateStats(voltageType);
-    bms_printVoltage(voltageType);
+
+    if (DEBUG_SERIAL_VOLTAGE_ENABLED) bms_printVoltage(voltageType);
 
     return BMS_OK;
 }
@@ -655,17 +699,29 @@ BMS_StatusTypeDef bms_getAuxMeasurement(void)
     ADAX.CH4  = 0b0;
     ADAX.PUP  = 0b0;
 
-    //    bms_startTimer();
+//    bms_startTimer();
 //    bms_wakeupChain();
+
+    //bms_transmitCmd((uint8_t *)&ADAX);
+    //bms_transmitPoll(PLAUX1);
+    //if (bms_getAuxVoltage())
+    //{
+    //    return BMS_ERR_COMMS;
+    //}
 
     bms_transmitCmd((uint8_t *)&ADAX);
     bms_transmitPoll(PLAUX1);
-    if (bms_getAuxVoltage())
+    if (bms_getAuxVoltage(0))
     {
         return BMS_ERR_COMMS;
     }
-
+    bms68_setGpo45(0b11);           // Reset to default
     bms_printTemps();
+
+    //bms_parseTemps();
+    //bms_calculateStats(VOLTAGE_TEMP);
+    //if (DEBUG_SERIAL_VOLTAGE_ENABLED)   bms_printVoltage(VOLTAGE_TEMP);
+    //if (DEBUG_SERIAL_AUX_ENABLED)      bms_printTemps();
 
 //    uint32_t time = bms_getTimCount();
 //    bms_stopTimer();
@@ -742,23 +798,8 @@ void bms_setPwm(uint8_t ic_index, uint8_t cell, uint8_t dutyCycle)
  */
 float bms_calculateBalancing(float deltaThreshold)
 {
-    float min = 999.0;
-    float max = -999.0;
-
-    for (int ic = 0; ic < TOTAL_AD68; ic++)
-    {
-        float segment_min = ic_ad68.v_cell_min[dischargeVoltageType][ic];
-        float segment_max = ic_ad68.v_cell_max[dischargeVoltageType][ic];
-
-        if (segment_min < min)
-        {
-            min = segment_min;
-        }
-        if (segment_max > max)
-        {
-            max = segment_max;
-        }
-    }
+    float min = ic_common.v_pack_min;
+    float max = ic_common.v_pack_max;
 
     if (max - min > deltaThreshold)
     {
@@ -789,6 +830,8 @@ void bms_startDischarge(float dischargeThreshold)
                 cellDischargeCount++;
             }
         }
+
+        if (cellDischargeCount == 0) {cellDischargeCount = 1; };
 
         dutyCycle = maxDischarge / cellDischargeCount;
         if (dutyCycle > 0b1111)
@@ -835,6 +878,7 @@ void bms_stopDischarge(void)
         for (int c = 0; c < TOTAL_CELL; c++)
         {
             bms_setPwm(ic, c, 0b0000);    // Turn off PWM discharge for that cell
+            BIT_CLEAR(ic_ad68.isDischarging[ic], c);
         }
 
         // The PWM discharge functionality is possible in the standby, REF-UP, extended balancing and in the measure states
@@ -868,11 +912,17 @@ BMS_StatusTypeDef bms29_readVB(void)
 
         ic_ad29.vb1 = *((int16_t *)(rxData[0] + 2)) *  0.000100 * 396.604395604;
         ic_ad29.vb2 = *((int16_t *)(rxData[0] + 4)) * -0.000085 * 751;
-        printfDma("Pack Voltage %fV, %fV  \n", ic_ad29.vb1, ic_ad29.vb2);
+        if (DEBUG_SERIAL_MASTER_MEASUREMENTS)
+        {
+			printfDma("Pack Voltage %fV, %fV  \n", ic_ad29.vb1, ic_ad29.vb2);
+        }
     }
     else
     {
-        printfDma("Pack Voltage (AD29 Disabled!) \n");
+        if (DEBUG_SERIAL_MASTER_MEASUREMENTS)
+        {
+			printfDma("Pack Voltage (AD29 Disabled!) \n");
+        }
     }
     return BMS_OK;
 }
@@ -902,14 +952,19 @@ BMS_StatusTypeDef bms29_readCurrent(void)
 
         const float SHUNT_RESISTANCE = 0.000050; // 50 microOhms
 
-        ic_ad29.current1 = ((float)i1v / 1000000.0f) / SHUNT_RESISTANCE;
-        ic_ad29.current2 = ((float)i2v / 1000000.0f) / SHUNT_RESISTANCE;
-
-        printfDma("Current %fA, %fA  \n", ic_ad29.current1 , ic_ad29.current2);
+        ic_ad29.current1 = ((float)i1v / -1000000.0f) / SHUNT_RESISTANCE;
+        ic_ad29.current2 = ((float)i2v /  1000000.0f) / SHUNT_RESISTANCE;
+        if (DEBUG_SERIAL_MASTER_MEASUREMENTS)
+        {
+            printfDma("Current %fA, %fA  \n", ic_ad29.current1 , ic_ad29.current2);
+        }
     }
     else
     {
-        printfDma("Current (AD29 Disabled!) \n");
+        if (DEBUG_SERIAL_MASTER_MEASUREMENTS)
+        {
+            printfDma("Current (AD29 Disabled!) \n");
+        }
     }
     return BMS_OK;
 }
@@ -944,16 +999,6 @@ void bms_startBalancing(float deltaThreshold)
 {
     float dischargeThreshold = bms_calculateBalancing(deltaThreshold);
     bms_startDischarge(dischargeThreshold);
-}
-
-
-ChargerConfiguration chargerConfiguration;
-void BMS_ConfigCharger(uint16_t targetVoltage, uint16_t maxCurrent, bool enableCharging)
-{
-    // Charger Commands
-    chargerConfiguration.target_voltage = targetVoltage;
-    chargerConfiguration.max_current = maxCurrent;
-    chargerConfiguration.enable_charging = enableCharging;
 }
 
 
@@ -1032,27 +1077,16 @@ void BMS_GetCanData(CanTxMsg** buff, uint32_t* len)
 
         if (!isCommsError)
         {
-            int32_t packVoltage     = (ic_ad29.vb1 + ic_ad29.vb2) * 1000 / 2;
-            int16_t packCurrent     = (ic_ad29.current1 + ic_ad29.current2) * 100 / 2;
+            int16_t packVoltage     = (ic_ad29.vb1 + ic_ad29.vb2) * 10 / 2;
+            int16_t packCurrent     = (int16_t)(((ic_ad29.current1 + ic_ad29.current2) * 100.0f) / 2.0f);
 
-            // Adds all voltages up instead of getting from the master
-            packVoltage = 0;
-            for (int ic = 0; ic < TOTAL_AD68; ic++)
-            {
-                for (int c = 0; c < TOTAL_CELL; c++)
-                {
-                    int16_t test = (int16_t)(ic_ad68.v_cell[dischargeVoltageType][ic][c] * 1000.0);
-                    packVoltage += test;
-                }
-            }
+            packVoltage = ic_common.v_pack_total * 10; // overwrite the packvoltage measurement from master
 
             canTxBuffer[bufferlen].data[0] = (packVoltage >> 0)  & 0xFF;
             canTxBuffer[bufferlen].data[1] = (packVoltage >> 8)  & 0xFF;
-            canTxBuffer[bufferlen].data[2] = (packVoltage >> 16) & 0xFF;
-            canTxBuffer[bufferlen].data[3] = (packVoltage >> 24) & 0xFF;
 
-            canTxBuffer[bufferlen].data[4] = (packCurrent >> 0)  & 0xFF;
-            canTxBuffer[bufferlen].data[5] = (packCurrent >> 8)  & 0xFF;
+            canTxBuffer[bufferlen].data[2] = (packCurrent >> 0)  & 0xFF;
+            canTxBuffer[bufferlen].data[3] = (packCurrent >> 8)  & 0xFF;
 
             txHeader.Identifier = BASE_CAN_ID + 7*TOTAL_CELL + 7;
             canTxBuffer[bufferlen].header = txHeader;
@@ -1061,26 +1095,47 @@ void BMS_GetCanData(CanTxMsg** buff, uint32_t* len)
     }
 
     // --- CHARGER CONFIG CAN MESSAGE --- //
-    if (enableCharging)
-    {
-        BMS_CAN_GetChargerMsg(&chargerConfiguration, canTxBuffer[bufferlen].data);
-        txHeader.Identifier = CHARGER_CONFIG_CAN_ID;
-        canTxBuffer[bufferlen].header = txHeader;
-        bufferlen++;
-    }
+    BMS_CAN_GetChargerMsg(&chargerConfig, canTxBuffer[bufferlen].data);
+    txHeader.Identifier = CHARGER_CONFIG_CAN_ID;
+    canTxBuffer[bufferlen].header = txHeader;
+    bufferlen++;
 
     *len = bufferlen;
     *buff = canTxBuffer;
-
-    newDataReady = false;
 }
 
 
-BMS_StatusTypeDef bms_checkStatus(void)
+BMS_StatusTypeDef BMS_CheckTemps(void)
 {
-    // Check voltage
-    // Check temp
+    return (BMS_StatusFlags & BMS_ERR_TEMP);
+}
 
+BMS_StatusTypeDef BMS_CheckVoltage(void)
+{
+    return (BMS_StatusFlags & BMS_ERR_VOLTAGE);
+}
+
+BMS_StatusTypeDef BMS_CheckCurrent(void)
+{
+    return (BMS_StatusFlags & BMS_ERR_CURRENT);
+}
+
+BMS_StatusTypeDef BMS_CheckCommsFault(void)
+{
+    return (BMS_StatusFlags & BMS_ERR_COMMS);
+}
+
+void BMS_SetCommsFault(bool state)
+{
+    if (state)
+        BMS_StatusFlags |= BMS_ERR_COMMS;   // Set fault
+    else
+        BMS_StatusFlags &= ~BMS_ERR_COMMS;  // Clear fault
+}
+
+
+BMS_StatusTypeDef BMS_UpdateStatusFlags(void)
+{
     const float MAX_PACK_VOLTAGE = 4.2 * 16 * 7;
     const float MIN_PACK_VOLTAGE = 3.0 * 16 * 7;
 
@@ -1099,41 +1154,45 @@ BMS_StatusTypeDef bms_checkStatus(void)
     const float MAX_IC_TEMP = 70;
     const float MIN_IC_TEMP = 0;
 
+//    const float MAX_PACK_VOLTAGE = 999;
+//    const float MIN_PACK_VOLTAGE = 000;
+//
+//    const float MAX_CURRENT = 10.0;
+//    const float MIN_CURRENT = -MAX_CURRENT;
+//
+//    const float MAX_VOLTAGE = 99;
+//    const float MIN_VOLTAGE = 0;
+//
+//    const float MAX_IC_VOLTAGE = 16;
+//    const float MIN_IC_VOLTAGE = 0;
+//
+//    const float MAX_TEMP = 9999;
+//    const float MIN_TEMP = 0;
+//
+//    const float MAX_IC_TEMP = 9999;
+//    const float MIN_IC_TEMP = 0;
+
     BMS_StatusTypeDef status = BMS_OK;
     BMS_StatusTypeDef returnStatus = BMS_OK;
 
     if (TOTAL_AD29)
     {
-        float packVoltage = ic_ad29.vb1;        // TODO: Figure out how to combine 2 values
+//        float packVoltage = ic_ad29.vb1;        // TODO: Figure out how to combine 2 values
+        float packVoltage = ic_common.v_pack_total;
         float packCurrent = ic_ad29.current1;
-
-        /*if (packVoltage > MAX_PACK_VOLTAGE)
+        if (packVoltage > MAX_PACK_VOLTAGE || packVoltage < MIN_PACK_VOLTAGE)
         {
-            printfDma("Pack Overvoltage Detected %f V \n", packVoltage);
+            printfDma("PACK VOLTAGE FAULT %f V \n", packVoltage);
             ic_common.isFaultDetected[0] = true;
-            status = BMS_ERR_FAULT;
+            status |= BMS_ERR_VOLTAGE;
         }
 
-        if (packVoltage < MIN_PACK_VOLTAGE)
+        if (packCurrent > MAX_CURRENT || packCurrent < MIN_CURRENT)
         {
-            printfDma("Pack Undervoltage Detected %f V \n", packVoltage);
+            printfDma("PACK CURRENT FAULT %f C \n", packCurrent);
             ic_common.isFaultDetected[0] = true;
-            status = BMS_ERR_FAULT;
-        }*/
-
-        /*if (packCurrent > MAX_CURRENT)
-        {
-            printfDma("Pack OverTemp Detected %f C \n", packCurrent);
-            ic_common.isFaultDetected[0] = true;
-            status = BMS_ERR_FAULT;
+            status |= BMS_ERR_CURRENT;
         }
-
-        if (packCurrent < MIN_CURRENT)
-        {
-            printfDma("Pack UnderTemp Detected %f C \n", packCurrent);
-            ic_common.isFaultDetected[0] = true;
-            status = BMS_ERR_FAULT;
-        }*/
 
         if (status == BMS_OK)
         {
@@ -1151,38 +1210,24 @@ BMS_StatusTypeDef bms_checkStatus(void)
             float cellVoltage = ic_ad68.v_cell[dischargeVoltageType][ic][c];
             float cellTemp = ic_ad68.temp_cell[ic][c];
 
-            if (cellVoltage > MAX_VOLTAGE)
+            if (cellVoltage > MAX_VOLTAGE || cellVoltage < MIN_VOLTAGE)
             {
-                printfDma("Overvoltage Detected SEG %d, CELL %d, %f \n", ic+1, c+1, cellVoltage);
+                printfDma("CELL VOLTAGE FAULT SEG %d, CELL %d, %f \n", ic+1, c+1, cellVoltage);
                 BIT_SET(ic_ad68.isCellFaultDetected[ic], c);
-                status = BMS_ERR_FAULT;
+                status |= BMS_ERR_VOLTAGE;
             }
 
-            if (cellVoltage < MIN_VOLTAGE)
+            if (cellTemp > MAX_TEMP || cellTemp < MIN_TEMP)
             {
-                printfDma("Undervoltage Detected SEG %d, CELL %d, %f \n", ic+1, c+1, cellVoltage);
+                printfDma("CELL TEMP FAULT SEG %d, CELL %d, %f \n", ic+1, c+1, cellTemp);
                 BIT_SET(ic_ad68.isCellFaultDetected[ic], c);
-                status = BMS_ERR_FAULT;
-            }
-
-            /*if (cellTemp > MAX_TEMP)
-            {
-                printfDma("OverTemp Detected SEG %d, CELL %d, %f \n", ic+1, c+1, cellTemp);
-                BIT_SET(ic_ad68.isCellFaultDetected[ic], c);
-                status = BMS_ERR_FAULT;
-            }
-
-            if (cellTemp < MIN_TEMP)
-            {
-                printfDma("UnderTemp Detected SEG %d, CELL %d, %f \n", ic+1, c+1, cellTemp);
-                BIT_SET(ic_ad68.isCellFaultDetected[ic], c);
-                status = BMS_ERR_FAULT;
+                status |= BMS_ERR_TEMP;
             }
 
             if (status == BMS_OK)
             {
                 BIT_CLEAR(ic_ad68.isCellFaultDetected[ic], c);
-            }*/
+            }
 
             returnStatus |= status;
             status = BMS_OK;
@@ -1191,33 +1236,19 @@ BMS_StatusTypeDef bms_checkStatus(void)
         float icVoltage = ic_ad68.v_segment[ic];
         float icTemp = ic_ad68.temp_ic[ic];
 
-        /*if (icVoltage > MAX_IC_VOLTAGE)
+        if (icVoltage > MAX_IC_VOLTAGE || icVoltage < MIN_IC_VOLTAGE)
         {
-            printfDma("IC Overvoltage Detected SEG %d, %f \n", ic+1, icVoltage);
+            printfDma("IC VOLTAGE FAULT: SEG %d, %f \n", ic+1, icVoltage);
             ic_common.isFaultDetected[ic + TOTAL_AD29] = true;
-            status = BMS_ERR_FAULT;
+            status |= BMS_ERR_VOLTAGE;
         }
 
-        if (icVoltage < MIN_IC_VOLTAGE)
+        if (icTemp > MAX_IC_TEMP || icTemp < MIN_IC_TEMP)
         {
-            printfDma("IC Undervoltage Detected SEG %d, %f \n", ic+1, icVoltage);
+            printfDma("IC TEMP FAULT: SEG %d, %f \n", ic+1, icTemp);
             ic_common.isFaultDetected[ic + TOTAL_AD29] = true;
-            status = BMS_ERR_FAULT;
+            status |= BMS_ERR_TEMP;
         }
-
-        if (icTemp > MAX_IC_TEMP)
-        {
-            printfDma("IC OverTemp Detected SEG %d, %f \n", ic+1, icTemp);
-            ic_common.isFaultDetected[ic + TOTAL_AD29] = true;
-            status = BMS_ERR_FAULT;
-        }
-
-        if (icTemp < MIN_IC_TEMP)
-        {
-            printfDma("IC UnderTemp Detected SEG %d, %f \n", ic+1, icTemp);
-            ic_common.isFaultDetected[ic + TOTAL_AD29] = true;
-            status = BMS_ERR_FAULT;
-        }*/
 
         if (status == BMS_OK)
         {
@@ -1227,6 +1258,8 @@ BMS_StatusTypeDef bms_checkStatus(void)
         returnStatus |= status;
         status = BMS_OK;
     }
+
+    BMS_StatusFlags = returnStatus;
     return returnStatus;
 }
 
@@ -1234,9 +1267,9 @@ BMS_StatusTypeDef bms_checkStatus(void)
 
 BMS_StatusTypeDef BMS_ProgramLoop(void)
 {
-    bms_wakeupChain();
     BMS_StatusTypeDef status;
-    if ((status = bms_readCellVoltage(VOLTAGE_C_FIL)))  return status;
+//    bms_wakeupChain();
+//    if ((status = bms_readCellVoltage(VOLTAGE_C_FIL)))  return status;
     bms_wakeupChain();
     if ((status = bms_getAuxMeasurement())) return status;
 
@@ -1248,29 +1281,38 @@ BMS_StatusTypeDef BMS_ProgramLoop(void)
     if ((status = bms_balancingMeasureVoltage()))       return status;
 
     // Only balancing/charging if status is OK
-    status = bms_checkStatus();
-    //status = BMS_ERR_FAULT;
+    status = BMS_UpdateStatusFlags();
 
-    /*bms_wakeupChain();
-    if (enableBalancing && (status == BMS_OK))
+    if (enableBalancing && (status == BMS_OK)) // Only if everything is OK, we enable balancing
     {
+        bms_wakeupChain();
         bms_startBalancing(balancingThreshold);
     }
 
-    uint16_t chargingTargetVoltage = 320;
-    uint16_t chargingMaxCurrent = 1;
-    if (enableCharging)
-    {
-        BMS_ConfigCharger(chargingTargetVoltage, chargingMaxCurrent, true);
-    }
-    else
-    {
-        BMS_ConfigCharger(chargingTargetVoltage, chargingMaxCurrent, false);
-    }
-
     bms_wakeupChain();
-    newDataReady = true;*/
     return status;
+}
+
+
+
+
+bool BMS_IsCharging(void)
+{
+    return !chargerConfig.disable_charging;
+}
+
+
+void BMS_EnableCharging(bool enabled)
+{
+    chargerConfig.disable_charging = !enabled;   // Inverted logic because config is disable = 1
+
+    char *state = (chargerConfig.disable_charging)? "Disabled" : "Enabled";
+    printfDma("Charger Status: %s\n", state);
+}
+
+void BMS_ToggleBalancing(void)
+{
+    enableBalancing = !enableBalancing;
 }
 
 
@@ -1279,26 +1321,52 @@ void BMS_EnableBalancing(bool enabled)
     enableBalancing = enabled;
 }
 
-void BMS_EnableCharging(bool enabled)
+
+void BMS_ChargingButtonLogic(void)
 {
-    enableCharging = enabled;
+    // Check for charger status and enables charging
+    // or disables charger if charging is enabled
+    bool chargerEnabled = !chargerConfig.disable_charging;
+
+    if (chargerEnabled)
+    {
+        BMS_EnableCharging(false);
+        return;
+    }
+
+    bool statusOK = true;
+    if (!HAL_GPIO_ReadPin(SDC_IN_GPIO_Port, SDC_IN_Pin)) statusOK = false;  // SDC is not connected
+//    if (chargerStatus.hardware_fault != false)      statusOK = false;
+//    if (chargerStatus.over_temp_fault != false)     statusOK = false;
+//    if (chargerStatus.input_voltage_fault != false) statusOK = false;
+//    if (chargerStatus.output_voltage < 300.0f)      statusOK = false;
+
+    if (statusOK)
+    {
+        BMS_EnableCharging(true);
+    }
+    else
+    {
+        printfDma("Charger NOT OK to start Charging \n");
+    }
 }
 
-void BMS_ToggleBalancing(void)
+
+
+
+void BMS_WriteFaultSignal(bool state)
 {
-    enableBalancing = !enableBalancing;
+    static bool currState = 1;
+    if (currState != state)
+    {
+        char *stateStr = (state)? "ON " : "OFF";
+        printfDma("FAULT SIGNAL UPDATE: %s\n", stateStr);
+
+        HAL_GPIO_WritePin(FAULT_CTRL_GPIO_Port, FAULT_CTRL_Pin, state); // If mosfet is ON, Fault == TRUE
+        currState = state;
+    }
 }
 
-void BMS_ToggleCharging(void)
-{
-    enableCharging = !enableCharging;
-    printfDma("Charger Status &d\n", enableCharging);
-}
-
-bool BMS_CheckNewDataReady(void)
-{
-    return newDataReady;
-}
 
 
 

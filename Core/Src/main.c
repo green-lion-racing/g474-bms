@@ -44,7 +44,17 @@
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 
-const float deltaThreshold = 0.010; // In volts
+typedef struct {
+    volatile uint32_t runtime_sec;
+    volatile uint32_t counter_commsError;
+    volatile uint32_t counter_commsErrorCumulative;
+} ProgramStats;
+
+typedef struct {
+    uint32_t freq;
+    uint32_t period;
+    float duty;
+} ImdStatus;
 
 /* USER CODE END PTD */
 
@@ -62,15 +72,22 @@ const float deltaThreshold = 0.010; // In volts
 
 /* USER CODE BEGIN PV */
 
+ProgramStats    programStats = {0};
+ImdStatus       imdStatus = {0};
+
+volatile bool initRequired = true;
+
+const uint32_t MAIN_LOOP_DELAY = 10;
+
+static const bool DEBUG_SERIAL_LOOP_TIME = false;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 
-uint32_t getRuntimeMs(void);
-uint32_t getRuntimeMsDiff(uint32_t startTime);
-
+void BMS_WriteFanDuty(float duty);
 void BMS_WriteFaultSignal(bool state);
 void BMS_FaultHandler(BMS_StatusTypeDef status);
 
@@ -79,10 +96,6 @@ void BMS_FaultHandler(BMS_StatusTypeDef status);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-volatile uint32_t runtime_sec = 0;
-volatile uint32_t counter_commsError = 0;
-volatile uint32_t counter_commsErrorCumulative = 0;
-volatile bool initRequired = true;
 
 /* USER CODE END 0 */
 
@@ -145,9 +158,11 @@ int main(void)
 
     // Start Timer16
     HAL_TIM_Base_Start_IT(&htim16);
+    HAL_TIM_IC_Start_IT(&htim15, TIM_CHANNEL_1); // Signal Input Channel (Main)
+    HAL_TIM_IC_Start(&htim15, TIM_CHANNEL_2);    // Secondary Channel
 
-//    // Initialise BMS configs (No commands sent)
-//    bms_init();
+    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);       // Fan PWM Output
+    BMS_WriteFanDuty(0.7);
 
     uint32_t timeDiff = 0;
     uint32_t timeStart;
@@ -159,15 +174,11 @@ int main(void)
     bms_wakeupChain();
     bms_softReset();
 
+
     BMS_StatusTypeDef bmsStatus;
-
-    BMS_EnableBalancing(false);
-    BMS_EnableCharging(false);
-
     while (1)
     {
-
-        timeStart = getRuntimeMs();
+        timeStart = HAL_GetTick();
 
         // Init BMS
         if (initRequired == true)
@@ -186,19 +197,21 @@ int main(void)
 
         // BMS Program Loop
         bmsStatus = BMS_ProgramLoop();
-        BMS_FaultHandler(bmsStatus);
-
-        if (bmsStatus == BMS_OK)
+        if (bmsStatus != BMS_OK)
         {
-            // Everything is OK, so disable the fault signal
-            BMS_WriteFaultSignal(false);
-            BMS_EnableBalancing(true);
+            BMS_FaultHandler(bmsStatus);
         }
 
-        timeDiff = getRuntimeMsDiff(timeStart);
-        printfDma("\nRuntime: %ld ms, LoopTime: %ld ms \n\n", getRuntimeMs(), timeDiff);
+        printfDma("-\n");
 
-        HAL_Delay(900);
+        // Calculate single loop runtime
+        timeDiff = HAL_GetTick() - timeStart;
+        if (DEBUG_SERIAL_LOOP_TIME)
+        {
+            printfDma("\nRuntime: %ld ms, LoopTime: %ld ms \n\n", HAL_GetTick(), timeDiff);
+        }
+
+        HAL_Delay(MAIN_LOOP_DELAY);
 
     /* USER CODE END WHILE */
 
@@ -258,36 +271,108 @@ void SystemClock_Config(void)
 // Callback: timer has rolled over
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-    // Check which version of the timer triggered this callback and toggle LED
-    if (htim == &htim16) // This is triggered every second
-    {
-        runtime_sec += 1;
-        // check CAN status
-        // check for faults
-        // check for bms status
-        // if OK, get can data
-        // send CAN messages
+    uint32_t currentTime = HAL_GetTick(); // Get current time
 
-//        if (BMS_CheckNewDataReady())
+    // Check which version of the timer triggered this callback and toggle LED
+    static uint32_t secondsDiv = 0;
+
+    // CAN Transmit Periodic Timing Variable
+    static uint32_t canTiming = 0;
+
+    // Voltage fault timer variables
+    const uint32_t VOLTAGE_FAULT_PERIOD = 500 - 10;
+    static uint32_t lastVoltageFaultTime = 0;
+    static bool voltageFaultDetected = false;
+
+    // Temperature fault Time
+    const uint32_t TEMP_FAULT_PERIOD = 1000 - 10;
+    static uint32_t lastTempFaultTime = 0;
+    static bool tempFaultDetected = false;
+
+    if (htim == &htim16) // This is triggered 10x every second
+    {
+        // runtime (seconds) timer
+        if (++secondsDiv >= 10)
+        {
+            programStats.runtime_sec += 1;
+            secondsDiv = 0;
+        }
+
+        // CAN Timing Divider
+        if (++canTiming >= 5)
         {
             CanTxMsg *msgArr = NULL;
             uint32_t len = 0;
             BMS_GetCanData(&msgArr, &len);
             BMS_CAN_SendBuffer(msgArr, len);
+            canTiming = 0;
+        }
+
+        // voltage fault handling
+        if (BMS_CheckVoltage() == BMS_OK)       // If OK:
+        {
+            voltageFaultDetected = false;
+        }
+        else                                    // If NOT OK
+        {
+            if (!voltageFaultDetected)          // First time NOT OK
+            {
+                voltageFaultDetected = true;
+                lastVoltageFaultTime = currentTime;
+            }
+            else if (currentTime - lastVoltageFaultTime > VOLTAGE_FAULT_PERIOD)     // NOT OK for given period
+            {
+                BMS_WriteFaultSignal(true);
+            }
+        }
+
+        // temperature fault handling
+        if (BMS_CheckTemps() == BMS_OK)     // If OK:
+        {
+            tempFaultDetected = false;
+        }
+        else                                // If NOT OK
+        {
+            if (!tempFaultDetected)         // First time NOT OK
+            {
+                tempFaultDetected = true;
+                lastTempFaultTime = currentTime;
+            }
+            else if (currentTime - lastTempFaultTime > TEMP_FAULT_PERIOD)     // NOT OK for given period
+            {
+                BMS_WriteFaultSignal(true);
+            }
+        }
+
+        // Disable fault signal only if everything is OK
+        if (!tempFaultDetected && !voltageFaultDetected && (BMS_CheckCommsFault() == BMS_OK))
+        {
+            BMS_WriteFaultSignal(false);
+        }
+
+        // If charging and SDC is disconnected (LOW):
+        if (BMS_IsCharging() && !HAL_GPIO_ReadPin(SDC_IN_GPIO_Port, SDC_IN_Pin))
+        {
+            printfDma("SDC Disconnected, Disabling Charging \n");
+            BMS_EnableCharging(false);
         }
     }
 }
 
 
-uint32_t getRuntimeMs(void)
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
-    return HAL_GetTick();
-}
+    if (htim == &htim15)   // PWM input
+    {
+        const uint32_t clockFreq = 128 * 1000 * 1000; // in Hz
 
-
-uint32_t getRuntimeMsDiff(uint32_t startTime)
-{
-    return HAL_GetTick() - startTime; // Divide 10 to get 10ms
+        imdStatus.period = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+        if (imdStatus.period != 0)
+        {
+            imdStatus.duty = (HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2)*100.0) / imdStatus.period;
+            imdStatus.freq = (clockFreq/imdStatus.period);
+        }
+    }
 }
 
 
@@ -301,32 +386,25 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 
     switch (GPIO_Pin)
     {
-        case B1_Pin:                // Blue onboard button (for debugging mainly)
-            // Debounce check
-            if (currentTime - lastDebounceTime_B1 < DEBOUNCE_DELAY) break;
-            lastDebounceTime_B1 = currentTime;
-            printfDma("Blue Button pressed\n");
-            break;
+    case B1_Pin:                // Blue onboard button (for debugging mainly)
+        // Debounce check
+        if (currentTime - lastDebounceTime_B1 < DEBOUNCE_DELAY) break;
+        lastDebounceTime_B1 = currentTime;
+        printfDma("Blue Button pressed\n");
+        break;
 
-        case CHRGR_BTTN_Pin:        // Charger Button
-            // Debounce check
-            if (currentTime - lastDebounceTime_CHRGR_BTTN < DEBOUNCE_DELAY) break;
-            lastDebounceTime_CHRGR_BTTN = currentTime;
-            printfDma("Charger Button pressed\n");
+    case CHRGR_BTTN_Pin:        // Charger Button
+        // Debounce check
+        if (currentTime - lastDebounceTime_CHRGR_BTTN < DEBOUNCE_DELAY) break;
+        lastDebounceTime_CHRGR_BTTN = currentTime;
 
-            BMS_ToggleCharging();
+        printfDma("Charger Button pressed\n");
+        BMS_ChargingButtonLogic();
+        break;
 
-            break;
-
-        default:
-            break;
+    default:
+        break;
     }
-}
-
-
-void BMS_WriteFaultSignal(bool state)
-{
-    HAL_GPIO_WritePin(FAULT_CTRL_GPIO_Port, FAULT_CTRL_Pin, state); // If mosfet is ON, Fault == TRUE
 }
 
 
@@ -335,42 +413,55 @@ void BMS_FaultHandler(BMS_StatusTypeDef status)
     const uint32_t COMMS_RETRY_DELAY = 500;
     const uint32_t COMMS_RETRY_TIMES = 5;
 
+    // Disable discharge in any case
+    bms_wakeupChain();
+    bms_stopDischarge();
+
+    // if currently charging:
+    if (BMS_IsCharging())
+    {
+        printfDma("Fault Detected, Disabling Charging \n");
+        BMS_EnableCharging(false);
+    }
+
     switch (status)
     {
-    case BMS_OK:
-        break;
-
     case BMS_ERR_COMMS:
-        counter_commsError = 0;
+        BMS_SetCommsFault(true);
+        programStats.counter_commsError = 0;
         do
         {
-            counter_commsError++;
-            counter_commsErrorCumulative++;
-            if (counter_commsError > COMMS_RETRY_TIMES)
+            programStats.counter_commsError++;
+            programStats.counter_commsErrorCumulative++;
+            if (programStats.counter_commsError > COMMS_RETRY_TIMES)
             {
                 BMS_WriteFaultSignal(true);
             }
-            bms_softReset();
             HAL_Delay(COMMS_RETRY_DELAY);
+            bms_softReset();
             bms_wakeupChain();
         }
         while (bms_readRegister(REG_SID) != BMS_OK);
 
         initRequired = true; // After comms is OK, redo init
         break;
-
-    case BMS_ERR_FAULT:
-        BMS_WriteFaultSignal(true);
-        break;
-
     default:
         break;
 
     /*bms_stopDischarge();
     BMS_EnableBalancing(false);
     BMS_EnableCharging(false);*/
-
     }
+}
+
+void BMS_WriteFanDuty(float duty)
+{
+    if (duty > 1 || duty <= 0)
+        return;
+
+    duty = 1 - duty;
+
+    TIM3->CCR2 = (uint16_t)(255.0 * duty);
 }
 
 

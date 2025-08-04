@@ -12,9 +12,7 @@
 
 FDCAN_TxHeaderTypeDef TxHeader;
 
-
-#define BUFFER_LEN (7 * 16 + 32)       // TODO: Accurate buffer size
-CanTxMsg txBuffer[BUFFER_LEN];
+CanTxMsg txBuffer[CAN_BUFFER_LEN];
 volatile uint32_t txBufferHeadIndex = 0;
 volatile uint32_t txBufferTailIndex = 0;
 volatile bool isBufferTransmitting = false;
@@ -165,7 +163,7 @@ void static CAN_AbortTx()
 
 void BMS_CAN_SendBuffer(CanTxMsg* msgArr, uint32_t len)
 {
-    if (len > BUFFER_LEN)
+    if (len > CAN_BUFFER_LEN)
     {
         printfDma("Error CANTX: len larger than buffer \n");
         return;
@@ -175,7 +173,7 @@ void BMS_CAN_SendBuffer(CanTxMsg* msgArr, uint32_t len)
     {
         isBufferTransmitting = false;       // Disable recursive callback in case some are still being sent
         CAN_AbortTx();
-        printfDma("Error CANTX: previous buffer tx overwritten \n");
+        printfDma("Error: CAN TX Buffer Overwritten \n");
     }
 
     memcpy(txBuffer, msgArr, len * sizeof(CanTxMsg));
@@ -243,7 +241,7 @@ void BMS_CAN_GetChargerMsg(const ChargerConfiguration* config, uint8_t* data)
     data[3] = (uint8_t)((raw_current >> 0) & 0xFF);
 
     // Pack Charging Enable flag
-    data[4] = config->enable_charging ? 0x01 : 0x00;
+    data[4] = config->disable_charging ? 0x01 : 0x00;
 
     // Bytes 5, 6, 7 are unused but sent as 0.
     data[5] = 0x00;

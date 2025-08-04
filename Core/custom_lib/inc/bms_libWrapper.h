@@ -60,20 +60,24 @@ BMS_StatusTypeDef bms_balancingMeasureVoltage(void);
 
 void bms_startBalancing(float deltaThreshold);
 
-
-void BMS_ConfigCharger(uint16_t targetVoltage, uint16_t maxCurrent, bool enableCharging);
-
 void BMS_GetCanData(CanTxMsg** buff, uint32_t* len);
 
 
 BMS_StatusTypeDef BMS_ProgramLoop(void);
 
+void BMS_EnableCharging(bool enabled);
+void BMS_ChargingButtonLogic(void);
+bool BMS_IsCharging(void);
 
 void BMS_EnableBalancing(bool enabled);
-void BMS_EnableCharging(bool enabled);
 void BMS_ToggleBalancing(void);
-void BMS_ToggleCharging(void);
-bool BMS_CheckNewDataReady(void);
 
+BMS_StatusTypeDef BMS_CheckTemps(void);
+BMS_StatusTypeDef BMS_CheckVoltage(void);
+BMS_StatusTypeDef BMS_CheckCurrent(void);
+BMS_StatusTypeDef BMS_CheckCommsFault(void);
 
+void BMS_SetCommsFault(bool state);
+
+void BMS_WriteFaultSignal(bool state);
 
