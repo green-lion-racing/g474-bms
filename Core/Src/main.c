@@ -156,6 +156,8 @@ int main(void)
     // Configure FDCAN
     BMS_CAN_Config();
 
+    //BMS_CAN_Test();
+
     // Start Timer16
     HAL_TIM_Base_Start_IT(&htim16);
     HAL_TIM_IC_Start_IT(&htim15, TIM_CHANNEL_1); // Signal Input Channel (Main)
@@ -381,26 +383,18 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     uint32_t currentTime = HAL_GetTick();
 
     const uint32_t DEBOUNCE_DELAY = 500;
-    static uint32_t lastDebounceTime_B1 = 0;
-    static uint32_t lastDebounceTime_CHRGR_BTTN = 0;
+    static uint32_t lastDebounceTime = 0;
 
     switch (GPIO_Pin)
     {
-    case B1_Pin:                // Blue onboard button (for debugging mainly)
+	case B1_Pin:        // Balancing Button
         // Debounce check
-        if (currentTime - lastDebounceTime_B1 < DEBOUNCE_DELAY) break;
-        lastDebounceTime_B1 = currentTime;
-        printfDma("Blue Button pressed\n");
+        if (currentTime - lastDebounceTime < DEBOUNCE_DELAY) break;
+        lastDebounceTime = currentTime;
+
+        printfDma("Balancing Button pressed\n");
+        BMS_ToggleBalancing();
         break;
-
-    /*case CHRGR_BTTN_Pin:        // Charger Button
-        // Debounce check
-        if (currentTime - lastDebounceTime_CHRGR_BTTN < DEBOUNCE_DELAY) break;
-        lastDebounceTime_CHRGR_BTTN = currentTime;
-
-        printfDma("Charger Button pressed\n");
-        BMS_ChargingButtonLogic();
-        break;*/
 
     default:
         break;

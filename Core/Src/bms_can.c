@@ -77,10 +77,81 @@ void static recursiveTransmit(void)
     }
 }
 
+/*
+void BMS_CAN_Test(void)
+{
+    const uint32_t CELL_COUNT   = (uint32_t)TOTAL_AD68 * (uint32_t)TOTAL_CELL;   // z. B. 12
+    const uint32_t SUMMARY_BASE = BASE_CAN_ID + CELL_COUNT;
+    const uint32_t TOTAL_FRAMES = CELL_COUNT + TOTAL_AD68;
+
+    FDCAN_TxHeaderTypeDef H = {0};
+    H.IdType              = FDCAN_EXTENDED_ID;
+    H.TxFrameType         = FDCAN_DATA_FRAME;
+    H.DataLength          = FDCAN_DLC_BYTES_8;
+    H.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+    H.BitRateSwitch       = FDCAN_BRS_OFF;
+    H.FDFormat            = FDCAN_CLASSIC_CAN;
+    H.TxEventFifoControl  = FDCAN_NO_TX_EVENTS;
+    H.MessageMarker       = 0;
+
+    int16_t testVoltage_mV = 1000;
+    int16_t testTemp_dC    = 100;
+    int16_t testDiff_mV    = 0;
+
+    isBufferTransmitting = false;
+    uint32_t w = 0;
+
+
+    for (int c = 0; c < TOTAL_CELL && w < TOTAL_FRAMES; ++c)
+    {
+        memset(txBuffer[w].data, 0, 8);
+
+        txBuffer[w].data[0] = (uint8_t)(testVoltage_mV & 0xFF);
+        txBuffer[w].data[1] = (uint8_t)(testVoltage_mV >> 8);
+
+        txBuffer[w].data[2] = (uint8_t)(testTemp_dC & 0xFF);
+        txBuffer[w].data[3] = (uint8_t)(testTemp_dC >> 8);
+
+        txBuffer[w].data[4] = (uint8_t)(testDiff_mV & 0xFF);
+        txBuffer[w].data[5] = (uint8_t)(testDiff_mV >> 8);
+
+        txBuffer[w].data[6] = 0x01;
+        txBuffer[w].data[7] = 0;
+
+        H.Identifier = BASE_CAN_ID + (uint32_t)c;
+        txBuffer[w].header = H;
+        ++w;
+    }
+
+    if (w < TOTAL_FRAMES)
+    {
+        memset(txBuffer[w].data, 0, 8);
+        int32_t v_segment_mV = TOTAL_CELL * testVoltage_mV;
+
+        txBuffer[w].data[0] = (uint8_t)(v_segment_mV & 0xFF);
+        txBuffer[w].data[1] = (uint8_t)(v_segment_mV >> 8);
+        txBuffer[w].data[2] = (uint8_t)(v_segment_mV >> 16);
+        txBuffer[w].data[3] = (uint8_t)(v_segment_mV >> 24);
+
+        txBuffer[w].data[4] = (uint8_t)(testTemp_dC & 0xFF);
+        txBuffer[w].data[5] = (uint8_t)(testTemp_dC >> 8);
+        txBuffer[w].data[6] = 0x01;
+        txBuffer[w].data[7] = 0;
+
+        H.Identifier = SUMMARY_BASE;
+        txBuffer[w].header = H;
+        ++w;
+    }
+
+    txBufferHeadIndex    = w;
+    txBufferTailIndex    = 0;
+    isBufferTransmitting = true;
+    recursiveTransmit();
+}
 
 void BMS_CAN_Test(void)
 {
-    /* Prepare Tx Header */
+    // Prepare Tx Header
     TxHeader.Identifier = 0xFF;
     TxHeader.IdType = FDCAN_EXTENDED_ID;
     TxHeader.TxFrameType = FDCAN_DATA_FRAME;
@@ -103,7 +174,7 @@ void BMS_CAN_Test(void)
 
     isBufferTransmitting = false;       // Disable recursive callback in case some are still being sent
 
-    /* Start the Transmission process */
+    // Start the Transmission process
     for (int i = 0; i < TOTAL_MSG_ID; i++)
     {
         TxData[0] = (uint8_t)(test_voltage & 0xFF);
@@ -123,7 +194,7 @@ void BMS_CAN_Test(void)
 
     recursiveTransmit();
 }
-
+*/
 
 void BMS_CAN_SendMsg(CanTxMsg msg)
 {

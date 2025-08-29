@@ -1048,8 +1048,11 @@ void BMS_GetCanData(CanTxMsg** buff, uint32_t* len)
         {
             int16_t cellVoltage = (int16_t)(ic_ad68.v_cell[dischargeVoltageType][ic][c] * 1000);
             int16_t voltageDiff = (int16_t)(ic_ad68.v_cell_diff[dischargeVoltageType][ic][c] * 1000);
+            int16_t cellTemp;
             if (c < TOTAL_TEMP)
-            	int16_t cellTemp    = (int16_t)(ic_ad68.temp_cell[ic][c] * 100);
+            {
+            	cellTemp    = (int16_t)(ic_ad68.temp_cell[ic][c] * 100);
+            }
             uint8_t isDischarging       = ((ic_ad68.isDischarging[ic]       >> c) & 0x01U);
             uint8_t isCellFaultDetected = ((ic_ad68.isCellFaultDetected[ic] >> c) & 0x01U);
 
@@ -1058,9 +1061,13 @@ void BMS_GetCanData(CanTxMsg** buff, uint32_t* len)
             canTxBuffer[bufferlen].data[2] = (uint8_t)(voltageDiff & 0xFF);
             canTxBuffer[bufferlen].data[3] = (uint8_t)((voltageDiff >> 8) & 0xFF);
             if (c < TOTAL_TEMP)
+            {
             	canTxBuffer[bufferlen].data[4] = (uint8_t)(cellTemp & 0xFF);
+            }
             if (c < TOTAL_TEMP)
+            {
             	canTxBuffer[bufferlen].data[5] = (uint8_t)((cellTemp >> 8) & 0xFF);
+            }
             canTxBuffer[bufferlen].data[6] = (uint8_t)((isDischarging << 0) | (isCellFaultDetected << 1));
 
             uint32_t id_cell_offset = ic * TOTAL_CELL + c;
@@ -1142,8 +1149,8 @@ void BMS_SetCommsFault(bool state)
 
 BMS_StatusTypeDef BMS_UpdateStatusFlags(void)
 {
-    const float MAX_PACK_VOLTAGE = 4.2 * 12 * 10;
-    const float MIN_PACK_VOLTAGE = 3.0 * 12 * 10;
+    const float MAX_PACK_VOLTAGE = 4.2 * TOTAL_CELL * TOTAL_AD68;
+    const float MIN_PACK_VOLTAGE = 3.0 * TOTAL_CELL * TOTAL_AD68;
 
     const float MAX_CURRENT = 10.0;
     const float MIN_CURRENT = -MAX_CURRENT;
@@ -1151,32 +1158,14 @@ BMS_StatusTypeDef BMS_UpdateStatusFlags(void)
     const float MAX_VOLTAGE = 4.2;
     const float MIN_VOLTAGE = 2.5;
 
-    const float MAX_IC_VOLTAGE = 4.2 * 12;
-    const float MIN_IC_VOLTAGE = 3.0 * 12;
+    const float MAX_IC_VOLTAGE = 4.2 * TOTAL_CELL;
+    const float MIN_IC_VOLTAGE = 3.0 * TOTAL_CELL;
 
     const float MAX_TEMP = 60;
     const float MIN_TEMP = 0;
 
     const float MAX_IC_TEMP = 70;
     const float MIN_IC_TEMP = 0;
-
-//    const float MAX_PACK_VOLTAGE = 999;
-//    const float MIN_PACK_VOLTAGE = 000;
-//
-//    const float MAX_CURRENT = 10.0;
-//    const float MIN_CURRENT = -MAX_CURRENT;
-//
-//    const float MAX_VOLTAGE = 99;
-//    const float MIN_VOLTAGE = 0;
-//
-//    const float MAX_IC_VOLTAGE = 16;
-//    const float MIN_IC_VOLTAGE = 0;
-//
-//    const float MAX_TEMP = 9999;
-//    const float MIN_TEMP = 0;
-//
-//    const float MAX_IC_TEMP = 9999;
-//    const float MIN_IC_TEMP = 0;
 
     BMS_StatusTypeDef status = BMS_OK;
     BMS_StatusTypeDef returnStatus = BMS_OK;
@@ -1295,7 +1284,7 @@ BMS_StatusTypeDef BMS_ProgramLoop(void)
     if ((status = bms29_readVB()))      return status;
     bms_wakeupChain();
     if ((status = bms29_readCurrent())) return status;
-    /*bms_wakeupChain();
+    bms_wakeupChain();
     if ((status = bms_balancingMeasureVoltage()))       return status;
 
     // Only balancing/charging if status is OK
@@ -1305,7 +1294,7 @@ BMS_StatusTypeDef BMS_ProgramLoop(void)
     {
         bms_wakeupChain();
         bms_startBalancing(balancingThreshold);
-    }*/
+    }
 
     bms_wakeupChain();
     return status;
@@ -1378,7 +1367,7 @@ void BMS_WriteFaultSignal(bool state)
     if (currState != state)
     {
         char *stateStr = (state)? "ON " : "OFF";
-        printfDma("FAULT SIGNAL UPDATE: %s\n", stateStr);
+        printfDma("FAULT SIGNAL UPDATE %s\n", stateStr);
 
         HAL_GPIO_WritePin(FAULT_CTRL_GPIO_Port, FAULT_CTRL_Pin, state); // If mosfet is ON, Fault == TRUE
         currState = state;
