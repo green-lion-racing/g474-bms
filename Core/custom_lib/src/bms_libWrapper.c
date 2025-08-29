@@ -1048,7 +1048,8 @@ void BMS_GetCanData(CanTxMsg** buff, uint32_t* len)
         {
             int16_t cellVoltage = (int16_t)(ic_ad68.v_cell[dischargeVoltageType][ic][c] * 1000);
             int16_t voltageDiff = (int16_t)(ic_ad68.v_cell_diff[dischargeVoltageType][ic][c] * 1000);
-            int16_t cellTemp    = (int16_t)(ic_ad68.temp_cell[ic][c] * 100);
+            if (c < TOTAL_TEMP)
+            	int16_t cellTemp    = (int16_t)(ic_ad68.temp_cell[ic][c] * 100);
             uint8_t isDischarging       = ((ic_ad68.isDischarging[ic]       >> c) & 0x01U);
             uint8_t isCellFaultDetected = ((ic_ad68.isCellFaultDetected[ic] >> c) & 0x01U);
 
@@ -1056,11 +1057,13 @@ void BMS_GetCanData(CanTxMsg** buff, uint32_t* len)
             canTxBuffer[bufferlen].data[1] = (uint8_t)((cellVoltage >> 8) & 0xFF);
             canTxBuffer[bufferlen].data[2] = (uint8_t)(voltageDiff & 0xFF);
             canTxBuffer[bufferlen].data[3] = (uint8_t)((voltageDiff >> 8) & 0xFF);
-            canTxBuffer[bufferlen].data[4] = (uint8_t)(cellTemp & 0xFF);
-            canTxBuffer[bufferlen].data[5] = (uint8_t)((cellTemp >> 8) & 0xFF);
+            if (c < TOTAL_TEMP)
+            	canTxBuffer[bufferlen].data[4] = (uint8_t)(cellTemp & 0xFF);
+            if (c < TOTAL_TEMP)
+            	canTxBuffer[bufferlen].data[5] = (uint8_t)((cellTemp >> 8) & 0xFF);
             canTxBuffer[bufferlen].data[6] = (uint8_t)((isDischarging << 0) | (isCellFaultDetected << 1));
 
-            uint32_t id_cell_offset = ic*TOTAL_CELL + c;
+            uint32_t id_cell_offset = ic * TOTAL_CELL + c;
 
             txHeader.Identifier = id + id_cell_offset;
             canTxBuffer[bufferlen].header = txHeader;
@@ -1083,7 +1086,7 @@ void BMS_GetCanData(CanTxMsg** buff, uint32_t* len)
             int16_t packVoltage     = (ic_ad29.vb1 + ic_ad29.vb2) * 10 / 2;
             int16_t packCurrent     = (int16_t)(((ic_ad29.current1 + ic_ad29.current2) * 100.0f) / 2.0f);
 
-            packVoltage = ic_common.v_pack_total * 10; // overwrite the packvoltage measurement from master
+            packVoltage = ic_common.v_pack_total * 10; // overwrite the pack voltage measurement from master
 
             canTxBuffer[bufferlen].data[0] = (packVoltage >> 0)  & 0xFF;
             canTxBuffer[bufferlen].data[1] = (packVoltage >> 8)  & 0xFF;
@@ -1098,10 +1101,10 @@ void BMS_GetCanData(CanTxMsg** buff, uint32_t* len)
     }
 
     // --- CHARGER CONFIG CAN MESSAGE --- //
-    BMS_CAN_GetChargerMsg(&chargerConfig, canTxBuffer[bufferlen].data);
-    txHeader.Identifier = CHARGER_CONFIG_CAN_ID;
-    canTxBuffer[bufferlen].header = txHeader;
-    bufferlen++;
+    //BMS_CAN_GetChargerMsg(&chargerConfig, canTxBuffer[bufferlen].data);
+    //txHeader.Identifier = CHARGER_CONFIG_CAN_ID;
+    //canTxBuffer[bufferlen].header = txHeader;
+    //bufferlen++;
 
     *len = bufferlen;
     *buff = canTxBuffer;

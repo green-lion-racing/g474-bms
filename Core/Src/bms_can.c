@@ -165,7 +165,7 @@ void BMS_CAN_SendBuffer(CanTxMsg* msgArr, uint32_t len)
 {
     if (len > CAN_BUFFER_LEN)
     {
-        printfDma("Error CANTX: len larger than buffer \n");
+        printfDma("\nError CANTX: len larger than buffer \n");
         return;
     }
 
@@ -173,7 +173,7 @@ void BMS_CAN_SendBuffer(CanTxMsg* msgArr, uint32_t len)
     {
         isBufferTransmitting = false;       // Disable recursive callback in case some are still being sent
         CAN_AbortTx();
-        printfDma("Error: CAN TX Buffer Overwritten \n");
+        printfDma("\nError: CAN TX Buffer Overwritten \n");
     }
 
     memcpy(txBuffer, msgArr, len * sizeof(CanTxMsg));

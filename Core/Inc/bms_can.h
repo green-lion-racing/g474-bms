@@ -16,6 +16,7 @@
 #define BASE_CAN_ID 0xB000
 
 #define CAN_BUFFER_LEN (7 * 16 + 64)       // TODO: Accurate buffer size
+//#define CAN_BUFFER_LEN ((TOTAL_AD68 * (TOTAL_CELL + 1)) + (TOTAL_AD29 * 2)) * 8 * 8 // not respecting bms charger config message
 
 typedef struct
 {
