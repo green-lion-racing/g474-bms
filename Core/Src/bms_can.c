@@ -84,7 +84,11 @@ void BMS_CAN_Test(void)
     const uint32_t SUMMARY_BASE = BASE_CAN_ID + CELL_COUNT;
     const uint32_t TOTAL_FRAMES = CELL_COUNT + TOTAL_AD68;
 
-    FDCAN_TxHeaderTypeDef H = {0};
+    // genau eine Zelle mit 4.0V und genau eine Zelle mit 40°C
+    const uint32_t VOLTAGE_SPECIAL_CELL = 0u; // Index der Zelle mit 4.000 mV
+    const uint32_t TEMP_SPECIAL_CELL    = 1u; // Index der Zelle mit 40.0 °C
+
+    FDCAN_TxHeaderTypeDef H = (FDCAN_TxHeaderTypeDef){0};
     H.IdType              = FDCAN_EXTENDED_ID;
     H.TxFrameType         = FDCAN_DATA_FRAME;
     H.DataLength          = FDCAN_DLC_BYTES_8;
@@ -94,23 +98,32 @@ void BMS_CAN_Test(void)
     H.TxEventFifoControl  = FDCAN_NO_TX_EVENTS;
     H.MessageMarker       = 0;
 
-    int16_t testVoltage_mV = 1000;
-    int16_t testTemp_dC    = 100;
-    int16_t testDiff_mV    = 0;
+    // Basiswerte
+    const int16_t baseVoltage_mV    = 3700; // set all to
+    const int16_t baseTemp_dC       = 230;  // set all to
+    const int16_t specialVoltage_mV = 2000; // seto
+    const int16_t specialTemp_dC    = 230;  //
+    const int16_t testDiff_mV       = 0;
 
     isBufferTransmitting = false;
     uint32_t w = 0;
 
+    int32_t v_segment_mV_sum = 0; // Summe für Summary-Frame
 
     for (int c = 0; c < TOTAL_CELL && w < TOTAL_FRAMES; ++c)
     {
         memset(txBuffer[w].data, 0, 8);
 
-        txBuffer[w].data[0] = (uint8_t)(testVoltage_mV & 0xFF);
-        txBuffer[w].data[1] = (uint8_t)(testVoltage_mV >> 8);
+        // pro Zelle 4.0 V genau bei VOLTAGE_SPECIAL_CELL, sonst 3.7 V
+        const int16_t v_mV = ((uint32_t)c == VOLTAGE_SPECIAL_CELL) ? specialVoltage_mV : baseVoltage_mV;
+        // pro Zelle 40.0 °C genau bei TEMP_SPECIAL_CELL, sonst 23.0 °C
+        const int16_t t_dC = ((uint32_t)c == TEMP_SPECIAL_CELL)    ? specialTemp_dC    : baseTemp_dC;
 
-        txBuffer[w].data[2] = (uint8_t)(testTemp_dC & 0xFF);
-        txBuffer[w].data[3] = (uint8_t)(testTemp_dC >> 8);
+        txBuffer[w].data[0] = (uint8_t)(v_mV & 0xFF);
+        txBuffer[w].data[1] = (uint8_t)(v_mV >> 8);
+
+        txBuffer[w].data[2] = (uint8_t)(t_dC & 0xFF);
+        txBuffer[w].data[3] = (uint8_t)(t_dC >> 8);
 
         txBuffer[w].data[4] = (uint8_t)(testDiff_mV & 0xFF);
         txBuffer[w].data[5] = (uint8_t)(testDiff_mV >> 8);
@@ -121,20 +134,23 @@ void BMS_CAN_Test(void)
         H.Identifier = BASE_CAN_ID + (uint32_t)c;
         txBuffer[w].header = H;
         ++w;
+
+        v_segment_mV_sum += v_mV;
     }
 
+    // Summary-Frame: Spannungs-Summe aus den tatsächlichen Zellwerten
     if (w < TOTAL_FRAMES)
     {
         memset(txBuffer[w].data, 0, 8);
-        int32_t v_segment_mV = TOTAL_CELL * testVoltage_mV;
 
-        txBuffer[w].data[0] = (uint8_t)(v_segment_mV & 0xFF);
-        txBuffer[w].data[1] = (uint8_t)(v_segment_mV >> 8);
-        txBuffer[w].data[2] = (uint8_t)(v_segment_mV >> 16);
-        txBuffer[w].data[3] = (uint8_t)(v_segment_mV >> 24);
+        txBuffer[w].data[0] = (uint8_t)(v_segment_mV_sum & 0xFF);
+        txBuffer[w].data[1] = (uint8_t)(v_segment_mV_sum >> 8);
+        txBuffer[w].data[2] = (uint8_t)(v_segment_mV_sum >> 16);
+        txBuffer[w].data[3] = (uint8_t)(v_segment_mV_sum >> 24);
 
-        txBuffer[w].data[4] = (uint8_t)(testTemp_dC & 0xFF);
-        txBuffer[w].data[5] = (uint8_t)(testTemp_dC >> 8);
+        // Pack-/Segment-Temperatur hier unverändert als Basiswert belassen
+        txBuffer[w].data[4] = (uint8_t)(baseTemp_dC & 0xFF);
+        txBuffer[w].data[5] = (uint8_t)(baseTemp_dC >> 8);
         txBuffer[w].data[6] = 0x01;
         txBuffer[w].data[7] = 0;
 
@@ -148,6 +164,7 @@ void BMS_CAN_Test(void)
     isBufferTransmitting = true;
     recursiveTransmit();
 }
+
 
 void BMS_CAN_Test(void)
 {

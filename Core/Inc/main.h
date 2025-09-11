@@ -67,7 +67,7 @@ extern FDCAN_HandleTypeDef hfdcan2;
 #define TOTAL_CELL      12
 #define TOTAL_TEMP      10
 #define TOTAL_AD68      10
-#define TOTAL_AD29      0       // SHOULD ONLY BE EITHER 0 OR 1
+#define TOTAL_AD29      1       // SHOULD ONLY BE EITHER 0 OR 1
 
 #define TOTAL_IC        (TOTAL_AD29 + TOTAL_AD68)
 
@@ -133,6 +133,10 @@ void Error_Handler(void);
 #define T_SWDIO_GPIO_Port GPIOA
 #define T_SWCLK_Pin GPIO_PIN_14
 #define T_SWCLK_GPIO_Port GPIOA
+#define BMS_FAULT_Pin GPIO_PIN_10
+#define BMS_FAULT_GPIO_Port GPIOC
+#define BMS_CHARGER_OUT_Pin GPIO_PIN_12
+#define BMS_CHARGER_OUT_GPIO_Port GPIOC
 #define BMS_WAKE2_Pin GPIO_PIN_3
 #define BMS_WAKE2_GPIO_Port GPIOB
 #define BMS_MSTR2_Pin GPIO_PIN_4

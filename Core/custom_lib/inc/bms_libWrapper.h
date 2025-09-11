@@ -68,9 +68,13 @@ BMS_StatusTypeDef BMS_ProgramLoop(void);
 void BMS_EnableCharging(bool enabled);
 void BMS_ChargingButtonLogic(void);
 bool BMS_IsCharging(void);
+bool BMS_IsChargeAllowed(uint32_t errs, bool balancing_active, bool measuring_now);
+void BMS_ApplyChargePolicy(uint32_t errs, bool balancing_active, bool measuring_now, uint32_t now_ms);
+
 
 void BMS_EnableBalancing(bool enabled);
 void BMS_ToggleBalancing(void);
+static void bms_quickPwmOff_keepDcto(void);
 
 BMS_StatusTypeDef BMS_CheckTemps(void);
 BMS_StatusTypeDef BMS_CheckVoltage(void);

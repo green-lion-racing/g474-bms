@@ -51,10 +51,10 @@ void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(FAULT_CTRL_GPIO_Port, FAULT_CTRL_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOC, FAULT_CTRL_Pin|BMS_FAULT_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(BMS_CS2_GPIO_Port, BMS_CS2_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, BMS_CS2_Pin|BMS_CHARGER_OUT_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(BMS_MSTR_GPIO_Port, BMS_MSTR_Pin, GPIO_PIN_RESET);
@@ -100,6 +100,20 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(BMS_MSTR_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : BMS_FAULT_Pin */
+  GPIO_InitStruct.Pin = BMS_FAULT_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(BMS_FAULT_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : BMS_CHARGER_OUT_Pin */
+  GPIO_InitStruct.Pin = BMS_CHARGER_OUT_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(BMS_CHARGER_OUT_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : BMS_WAKE2_Pin BMS_INT2_Pin */
   GPIO_InitStruct.Pin = BMS_WAKE2_Pin|BMS_INT2_Pin;

@@ -181,6 +181,7 @@ int main(void)
     while (1)
     {
         timeStart = HAL_GetTick();
+        //BMS_CAN_Test();
 
         // Init BMS
         if (initRequired == true)
@@ -400,6 +401,8 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
         break;
     }
 }
+
+
 
 
 void BMS_FaultHandler(BMS_StatusTypeDef status)

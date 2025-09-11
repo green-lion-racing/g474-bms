@@ -127,6 +127,7 @@ uint8_t  rxCc[TOTAL_IC];
 CanTxMsg canTxBuffer[CAN_BUFFER_LEN] = {0};
 
 VoltageTypes dischargeVoltageType = VOLTAGE_S;
+VoltageTypes monitoringVoltageType = VOLTAGE_C_FIL;
 
 uint32_t BMS_StatusFlags = BMS_ERR_COMMS;          // Stores flags in bits
 
@@ -143,6 +144,68 @@ static const bool DEBUG_SERIAL_AUX_ENABLED = true;
 static const bool DEBUG_SERIAL_MASTER_MEASUREMENTS = true;
 
 volatile bool enableBalancing = false;
+
+static void BMS_UpdateChargingControl(uint32_t errs,
+                                      bool balancing_active,
+                                      bool measuring_now,
+                                      uint32_t now_ms);
+
+static inline void BMS_SetFaultLed(bool on);
+
+// set the dutycycle for each cell
+static inline uint8_t diff_to_pwm4bit(float diffV, uint8_t prev_duty)
+{
+    const float DIFF_ON     = 0.022f;
+    const float DIFF_OFF    = 0.020f;
+    const float DIFF_MAX    = 0.150f;
+    const float DUTY_MIN_F  = 0.40f;
+
+    const bool was_on = (prev_duty > 0); // check if the cell was already balancing before
+    bool now_on;
+    if (was_on) {
+        now_on = (diffV > DIFF_OFF);	// if active -> keep balancing until DIFF_OFF
+    } else {
+        now_on = (diffV >= DIFF_ON);
+    }
+
+    if (!now_on) return 0;
+
+    float x = 0.0f;
+    if (diffV <= DIFF_ON) x = 0.0f;
+    else if (diffV >= DIFF_MAX) x = 1.0f;
+    else x = (diffV - DIFF_ON) / (DIFF_MAX - DIFF_ON);
+
+    float duty_f = DUTY_MIN_F + x * (1.0f - DUTY_MIN_F);
+    int duty = (int)lroundf(duty_f * 15.0f);	// convert to a 4-bit value (0 - 15)
+
+    if (duty < 6)  duty = 6;
+    if (duty > 15) duty = 15;
+    return (uint8_t)duty;
+}
+
+
+// function to set the pwm
+static inline void set_cell_pwm_4bit(ad68_pwma_t* a, ad68_pwmb_t* b, uint8_t cell, uint8_t duty)
+{
+    duty &= 0x0F;
+    if (cell < 12) {
+        uint8_t *p = (uint8_t*)a;
+        uint8_t byte_idx = cell >> 1;
+        uint8_t hi = (cell & 1);
+        uint8_t v  = p[byte_idx];
+        p[byte_idx] = hi ? ((v & 0x0F) | (uint8_t)(duty << 4))
+                         : ((v & 0xF0) | duty);
+    } else {
+        cell -= 12;
+        uint8_t *p = (uint8_t*)b;
+        uint8_t byte_idx = cell >> 1;
+        uint8_t hi = (cell & 1);
+        uint8_t v  = p[byte_idx];
+        p[byte_idx] = hi ? ((v & 0x0F) | (uint8_t)(duty << 4))
+                         : ((v & 0xF0) | duty);
+    }
+}
+
 
 
 void bms_resetConfig(void)
@@ -239,6 +302,62 @@ void bms_writeRegister(RegisterTypes regType)
 }
 
 
+
+// Quick-PWM-OFF that keeps DCTO alive (no WRCFGB)
+static void bms_quickPwmOff_keepDcto(void)
+{
+    for (int ic = 0; ic < TOTAL_AD68; ic++) {
+        memset(&ic_ad68.pwma[ic], 0, sizeof(ic_ad68.pwma[ic]));
+        memset(&ic_ad68.pwmb[ic], 0, sizeof(ic_ad68.pwmb[ic]));
+        ic_ad68.cfb_Tx[ic].dcc = 0; // ensure DCC=0, PWM-only discharge disabled
+    }
+    // Only write PWM regs; DO NOT touch ConfigB here (keeps DCTO running)
+    bms_writeRegister(REG_PWM_A);
+    bms_writeRegister(REG_PWM_B);
+}
+
+
+// Liste der Zellen, die 100 % bekommen sollen (0-basiert)
+static const uint8_t k_test_cells[] = {0};
+static const size_t  k_test_cells_len = sizeof(k_test_cells)/sizeof(k_test_cells[0]);
+
+// Erzwingt PWM 100% auf den festgelegten Zellen (für alle ICs)
+void bms_forcePwmMask(void)
+{
+    for (int ic = 0; ic < TOTAL_AD68; ic++) {
+        ad68_pwma_t pwma = (ad68_pwma_t){0};
+        ad68_pwmb_t pwmb = (ad68_pwmb_t){0};
+
+        // feste Zellen auf 100 %
+        for (size_t i = 0; i < k_test_cells_len; ++i) {
+            uint8_t c = k_test_cells[i];
+            if (c >= TOTAL_CELL) continue;
+            set_cell_pwm_4bit(&pwma, &pwmb, c, 0x0F);
+            BIT_SET(ic_ad68.isDischarging[ic], c);
+        }
+
+        // DCC NIE setzen, DCTO aktiv halten
+        ic_ad68.cfb_Tx[ic].dcc   = 0;
+        ic_ad68.cfb_Tx[ic].dtrng = 0;   // Minuten
+        ic_ad68.cfb_Tx[ic].dcto  = 15;  // 15 min
+        ic_ad68.cfb_Tx[ic].dtmen = 0;
+
+        // Shadow-Register übernehmen
+        ic_ad68.pwma[ic] = pwma;
+        ic_ad68.pwmb[ic] = pwmb;
+    }
+
+    // Reihenfolge: erst PWM, dann CFGB
+    bms_writeRegister(REG_PWM_A);
+    bms_writeRegister(REG_PWM_B);
+    bms_writeRegister(REG_CONFIG_B);
+
+    // Debug: Rücklesen
+    bms_readRegister(REG_PWM_A);
+    bms_readRegister(REG_PWM_B);
+}
+
+
 BMS_StatusTypeDef bms_init(void)
 {
     bms_resetConfig();
@@ -269,8 +388,11 @@ BMS_StatusTypeDef bms_init(void)
 
     bms_writeRegister(REG_CONFIG_A);
     bms_startAdcvCont(false);            // Need to wait 8ms for the average register to fill up
-    bms_delayMsActive(12);
-
+    //bms_forcePwmMask();
+    printfDma("BUILD MARKER A | TOTAL_AD68=%d TOTAL_CELL=%d BASE_CAN_ID=0x%lX\r\n",
+              (int)TOTAL_AD68, (int)TOTAL_CELL, (unsigned long)BASE_CAN_ID);
+    printfDma("SUMMARY_BASE_OFFSET = 0x%lX\r\n",
+              (unsigned long)(TOTAL_AD68 * TOTAL_CELL));
     return BMS_OK;
 }
 
@@ -384,10 +506,10 @@ void bms_startAdcvCont(bool enableRedundant)
 
     ADCV.CONT = 1;      // Continuous
     ADCV.DCP  = 0;      // Discharge permitted
-    ADCV.RSTF = 1;      // Reset filter
+    ADCV.RSTF = 0;      // Reset filter
     ADCV.OW   = 0b00;   // Open wire on C-ADCS and S-ADCs
 
-    ADCV.RD   = enableRedundant;      // Redundant Measurement
+    ADCV.RD   = 0;      // Redundant Measurement
 
     // Behaviour of 2950 (ADI1 Command)
     //
@@ -648,7 +770,7 @@ void bms_printTemps(void)
 
 
 uint8_t* readCellVoltageCmdList[TOTAL_VOLTAGE_TYPES][6] = {
-        {RDCVA, RDCVB, RDCVC, RDCVD, RDCVE, RDCVF}, // VOLTAGE_TEMP
+        {RDCVA, RDCVB, RDCVC, RDCVD, RDCVE, RDCVF}, // VOLTAGE_C
         {RDACA, RDACB, RDACC, RDACD, RDACE, RDACF}, // VOLTAGE_C_AVG
         {RDFCA, RDFCB, RDFCC, RDFCD, RDFCE, RDFCF}, // VOLTAGE_FIL
         {RDSVA, RDSVB, RDSVC, RDSVD, RDSVE, RDSVF}, // VOLTAGE_S
@@ -714,7 +836,7 @@ BMS_StatusTypeDef bms_getAuxMeasurement(void)
 
     bms_transmitCmd((uint8_t *)&ADAX);
     bms_transmitPoll(PLAUX1);
-    if (bms_getAuxVoltage(0))
+    if (bms_getAuxVoltage())
     {
         return BMS_ERR_COMMS;
     }
@@ -808,70 +930,73 @@ float bms_calculateBalancing(float deltaThreshold)
     {
         return min + deltaThreshold;
     }
-    else
-    {
-        return 1000;  // No balancing needed set the voltage threshold very high
-    }
+    else { return ic_common.v_pack_min + deltaThreshold; } // halte Auswahl stabil
 }
+
 
 
 void bms_startDischarge(float dischargeThreshold)
 {
-//    dischargeThreshold = 5;  // Overwrite the discharge aim voltage (for testing)
-    uint32_t cellDischargeCount;                    // Keep count of how many cells will be discharged per segment
-    uint8_t dutyCycle = 0;                          // 4 bit pwm at 937 ms
-    const uint8_t maxDischarge = (0b0111 * 16);    // All cells discharge at half duty
+    // store last duty -> needed to avoid flicker at thresholds
+    static uint8_t last_duty[TOTAL_AD68][TOTAL_CELL] = {{0}};
+
+    // not needed here -> Threshold is set in "diff_to_pwm4bit"
+    (void)dischargeThreshold;
 
     for (int ic = 0; ic < TOTAL_AD68; ic++)
     {
-        cellDischargeCount = 0;
+        ad68_pwma_t pwma = (ad68_pwma_t){0};
+        ad68_pwmb_t pwmb = (ad68_pwmb_t){0};
 
         for (int c = 0; c < TOTAL_CELL; c++)
         {
-            if (ic_ad68.v_cell[dischargeVoltageType][ic][c] > dischargeThreshold)
-            {
-                cellDischargeCount++;
-            }
-        }
+            // takes S-ADC values
+            const float v     = ic_ad68.v_cell[dischargeVoltageType][ic][c];
+            const float diffV = v - ic_common.v_pack_min;
 
-        if (cellDischargeCount == 0) {cellDischargeCount = 1; };
+            // calculate duty
+            const uint8_t duty = diff_to_pwm4bit(diffV, last_duty[ic][c]);
 
-        dutyCycle = maxDischarge / cellDischargeCount;
-        if (dutyCycle > 0b1111)
-        {
-            dutyCycle = 0b1111;
-        }
-
-        for (int c = 0; c < TOTAL_CELL; c++)
-        {
-            if (ic_ad68.v_cell[dischargeVoltageType][ic][c] > dischargeThreshold)
-            {
-                printfDma("DISCHARGE IC %d, CELL %d, DC %d \n", ic+1, c+1, dutyCycle);
+            if (duty > 0) {
                 BIT_SET(ic_ad68.isDischarging[ic], c);
-                bms_setPwm(ic, c, dutyCycle);
-            }
-            else
-            {
+                set_cell_pwm_4bit(&pwma, &pwmb, (uint8_t)c, duty);
+            } else {
                 BIT_CLEAR(ic_ad68.isDischarging[ic], c);
-                bms_setPwm(ic, c, 0b0000);    // Turn off PWM discharge for that cell
+
             }
+
+            last_duty[ic][c] = duty; // update state
         }
 
-        // The PWM discharge functionality is possible in the standby, REF-UP, extended balancing and in the measure states
-        // AND while the discharge timeout has not expired (DCTO ≠ 0)
-        ic_ad68.cfb_Tx[ic].dcto = 1;     // DC Timer in minutes (DTRNG = 0)
-        ic_ad68.cfb_Tx[ic].dtmen = 0;    // Disables Discharge Timer Monitor (DTM)
-        // ic_ad68[0].cfb_Tx.dcc = 0b1; // --- High priority discharge (bypasses PWM)
+        // PWM mode: must not set static discharge bits (DCC)
+        ic_ad68.cfb_Tx[ic].dcc   = 0;
+
+        // keep discharge timer alive (DCTO)
+        ic_ad68.cfb_Tx[ic].dtrng = 0;
+        ic_ad68.cfb_Tx[ic].dcto  = 15;
+        ic_ad68.cfb_Tx[ic].dtmen = 0;
+
+        // Shadow-Register übernehmen
+        ic_ad68.pwma[ic] = pwma;
+        ic_ad68.pwmb[ic] = pwmb;
     }
 
-    // for testing -> enables discharge for cell 1
-//    printfDma("DISCHARGE IC 1, CELL 1 \n");
-//    ic_ad68.pwma[0].pwm1 = 0b1111;
+    // write registers in correct order: PWM first, then ConfigB
+    bms_writeRegister(REG_PWM_A);
+    bms_writeRegister(REG_PWM_B);
+    bms_writeRegister(REG_CONFIG_B);
 
-    bms_writeRegister(REG_CONFIG_B);             // Send the DCTO Timer config
-    bms_writeRegister(REG_PWM_A);                // Send the PWM configs
-    bms_writeRegister(REG_PWM_B);                // Send the PWM configs
+
+    bms_readRegister(REG_PWM_A);
+    bms_readRegister(REG_PWM_B);
+
+    bms_delayMsActive(2);
 }
+
+
+
+
+
 
 
 void bms_stopDischarge(void)
@@ -880,18 +1005,21 @@ void bms_stopDischarge(void)
     {
         for (int c = 0; c < TOTAL_CELL; c++)
         {
-            bms_setPwm(ic, c, 0b0000);    // Turn off PWM discharge for that cell
             BIT_CLEAR(ic_ad68.isDischarging[ic], c);
         }
 
         // The PWM discharge functionality is possible in the standby, REF-UP, extended balancing and in the measure states
         // AND while the discharge timeout has not expired (DCTO ≠ 0)
+        ic_ad68.cfb_Tx[ic].dcc = 0;
         ic_ad68.cfb_Tx[ic].dcto = 0;     // DC Timer in minutes (DTRNG = 0)
         ic_ad68.cfb_Tx[ic].dtmen = 0;    // Disables Discharge Timer Monitor (DTM)
+
+        memset(&ic_ad68.pwma[ic], 0, sizeof(ic_ad68.pwma[ic]));
+        memset(&ic_ad68.pwmb[ic], 0, sizeof(ic_ad68.pwmb[ic]));
     }
+    bms_writeRegister(REG_PWM_A);
+    bms_writeRegister(REG_PWM_B);
     bms_writeRegister(REG_CONFIG_B);             // Send the DCTO Timer config
-    bms_writeRegister(REG_PWM_A);                // Send the PWM configs
-    bms_writeRegister(REG_PWM_B);                // Send the PWM configs
 }
 
 
@@ -976,26 +1104,36 @@ BMS_StatusTypeDef bms29_readCurrent(void)
 
 BMS_StatusTypeDef bms_balancingMeasureVoltage(void)
 {
-    // 6830
-    // ADSV For triggering single shot S conversion (stops PWM) while C in unaffected
-    // So this stops PWM and wait for S to finish
-    // Then read the S voltage
-    // Potential improvement: S vs C ADC comparison
+    // --- Sicherheitsnetz: DCC MUSS 0 sein, sonst übersteuert es PWM & verfälscht S ---
+    bool need_cfgb_write = false;
+    for (int ic = 0; ic < TOTAL_AD68; ic++) {
+        if (ic_ad68.cfb_Tx[ic].dcc != 0) {
+            ic_ad68.cfb_Tx[ic].dcc = 0;      // alle DCCx löschen
+            need_cfgb_write = true;
+        }
+    }
+    if (need_cfgb_write) {
+        // DCTO/DTRNG/DTMEN nicht anfassen – nur DCC=0 rausgeben
+        bms_writeRegister(REG_CONFIG_B);
+        bms_delayMsActive(1);
+    }
 
-    ADSV.CONT = 0;      // Continuous
-    ADSV.DCP  = 0;      // Discharge permitted
-    ADSV.OW   = 0b00;   // Open wire on C-ADCS and S-ADCs
+    // --- ADSV Single-Shot S-ADC (PWM wird temporär pausiert) ---
+    ADSV.CONT = 0;      // Single-shot
+    ADSV.DCP  = 0;      // Entladen erlaubt (betrifft PWM; DCC ist eh 0)
+    ADSV.OW   = 0b00;   // kein Open-Wire-Test
 
     bms_transmitCmd((uint8_t *)&ADSV);
-
     bms_transmitPoll(PLSADC);
-    if (bms_readCellVoltage(dischargeVoltageType))
-    {
+
+    // S-Spannungen einlesen; dischargeVoltageType sollte VOLTAGE_S sein
+    if (bms_readCellVoltage(dischargeVoltageType)) {
         return BMS_ERR_COMMS;
     }
 
     return BMS_OK;
 }
+
 
 
 void bms_startBalancing(float deltaThreshold)
@@ -1024,7 +1162,10 @@ void BMS_GetCanData(CanTxMsg** buff, uint32_t* len)
 
     for (int ic = 0; ic < TOTAL_AD68; ic++)
     {
-        int32_t v_segment       = ic_ad68.v_segment[ic] * 1000;
+    	int32_t v_segment = 0;
+    	for (int c = 0; c < TOTAL_CELL; c++) {
+    	    v_segment += (int32_t)(ic_ad68.v_cell[monitoringVoltageType][ic][c] * 1000.0f + 0.5f);
+    	}
         int16_t temp_ic         = ic_ad68.temp_ic[ic]   * 100;
         uint8_t isCommsError    = ic_common.isCommsError[ic+TOTAL_AD29];
         uint8_t isFaultDetected = ic_common.isFaultDetected[ic+TOTAL_AD29];
@@ -1035,7 +1176,7 @@ void BMS_GetCanData(CanTxMsg** buff, uint32_t* len)
         memcpy(&canTxBuffer[bufferlen].data[4], &temp_ic, 2);
         canTxBuffer[bufferlen].data[6] = (uint8_t)((isCommsError << 0) | (isFaultDetected << 1));
 
-        txHeader.Identifier = BASE_CAN_ID + 7*TOTAL_CELL + ic;
+        txHeader.Identifier = BASE_CAN_ID + (TOTAL_AD68 * TOTAL_CELL) + ic;
         canTxBuffer[bufferlen].header = txHeader;
         bufferlen++;
 
@@ -1046,8 +1187,8 @@ void BMS_GetCanData(CanTxMsg** buff, uint32_t* len)
 
         for (int c = 0; c < TOTAL_CELL; c++)
         {
-            int16_t cellVoltage = (int16_t)(ic_ad68.v_cell[dischargeVoltageType][ic][c] * 1000);
-            int16_t voltageDiff = (int16_t)(ic_ad68.v_cell_diff[dischargeVoltageType][ic][c] * 1000);
+            int16_t cellVoltage = (int16_t)(ic_ad68.v_cell[monitoringVoltageType][ic][c] * 1000);
+            int16_t voltageDiff = (int16_t)(ic_ad68.v_cell_diff[monitoringVoltageType][ic][c] * 1000);
             int16_t cellTemp;
             if (c < TOTAL_TEMP)
             {
@@ -1084,7 +1225,7 @@ void BMS_GetCanData(CanTxMsg** buff, uint32_t* len)
         uint8_t isFaultDetected = ic_common.isFaultDetected[0];
 
         canTxBuffer[bufferlen].data[0] = (uint8_t)((isCommsError << 0) | (isFaultDetected << 1));
-        txHeader.Identifier = BASE_CAN_ID + 7*TOTAL_CELL + 7 + 1;
+        txHeader.Identifier = BASE_CAN_ID + (TOTAL_AD68 * TOTAL_CELL) + TOTAL_AD68 + 1;
         canTxBuffer[bufferlen].header = txHeader;
         bufferlen++;
 
@@ -1101,13 +1242,13 @@ void BMS_GetCanData(CanTxMsg** buff, uint32_t* len)
             canTxBuffer[bufferlen].data[2] = (packCurrent >> 0)  & 0xFF;
             canTxBuffer[bufferlen].data[3] = (packCurrent >> 8)  & 0xFF;
 
-            txHeader.Identifier = BASE_CAN_ID + 7*TOTAL_CELL + 7;
+            txHeader.Identifier = BASE_CAN_ID + (TOTAL_AD68 * TOTAL_CELL) + TOTAL_AD68;
             canTxBuffer[bufferlen].header = txHeader;
             bufferlen++;
         }
     }
 
-    // --- CHARGER CONFIG CAN MESSAGE --- //
+     //--- CHARGER CONFIG CAN MESSAGE --- //
     //BMS_CAN_GetChargerMsg(&chargerConfig, canTxBuffer[bufferlen].data);
     //txHeader.Identifier = CHARGER_CONFIG_CAN_ID;
     //canTxBuffer[bufferlen].header = txHeader;
@@ -1149,17 +1290,20 @@ void BMS_SetCommsFault(bool state)
 
 BMS_StatusTypeDef BMS_UpdateStatusFlags(void)
 {
-    const float MAX_PACK_VOLTAGE = 4.2 * TOTAL_CELL * TOTAL_AD68;
-    const float MIN_PACK_VOLTAGE = 3.0 * TOTAL_CELL * TOTAL_AD68;
+
+	const float MAX_VOLTAGE = 4.2;
+	const float MIN_VOLTAGE = 2.7;
+
+    const float MAX_PACK_VOLTAGE = MAX_VOLTAGE * TOTAL_CELL * TOTAL_AD68;
+    const float MIN_PACK_VOLTAGE = MIN_VOLTAGE * TOTAL_CELL * TOTAL_AD68;
 
     const float MAX_CURRENT = 10.0;
     const float MIN_CURRENT = -MAX_CURRENT;
 
-    const float MAX_VOLTAGE = 4.2;
-    const float MIN_VOLTAGE = 2.5;
 
-    const float MAX_IC_VOLTAGE = 4.2 * TOTAL_CELL;
-    const float MIN_IC_VOLTAGE = 3.0 * TOTAL_CELL;
+
+    const float MAX_IC_VOLTAGE = MAX_VOLTAGE * TOTAL_CELL;
+    const float MIN_IC_VOLTAGE = MIN_VOLTAGE * TOTAL_CELL;
 
     const float MAX_TEMP = 60;
     const float MIN_TEMP = 0;
@@ -1271,63 +1415,194 @@ BMS_StatusTypeDef BMS_UpdateStatusFlags(void)
 }
 
 
-
 BMS_StatusTypeDef BMS_ProgramLoop(void)
 {
     BMS_StatusTypeDef status;
-    bms_wakeupChain();
-    if ((status = bms_readCellVoltage(VOLTAGE_C_FIL)))  return status;
-    bms_wakeupChain();
-    if ((status = bms_getAuxMeasurement())) return status;
 
+    // c filter for measuring purpose -> does not pause PWM
     bms_wakeupChain();
-    if ((status = bms29_readVB()))      return status;
-    bms_wakeupChain();
-    if ((status = bms29_readCurrent())) return status;
-    bms_wakeupChain();
-    if ((status = bms_balancingMeasureVoltage()))       return status;
+    if ((status = bms_readCellVoltage(monitoringVoltageType))) return status;
 
-    // Only balancing/charging if status is OK
-    status = BMS_UpdateStatusFlags();
+    uint32_t now = HAL_GetTick();
 
-    if (enableBalancing && (status == BMS_OK)) // Only if everything is OK, we enable balancing
+    bms_wakeupChain(); if ((status = bms_getAuxMeasurement())) return status;
+    bms_wakeupChain(); if ((status = bms29_readVB()))          return status;
+    bms_wakeupChain(); if ((status = bms29_readCurrent()))     return status;
+
+    // Fault gating
+    uint32_t errs       = BMS_UpdateStatusFlags();
+    BMS_SetFaultLed(errs != BMS_OK);
+    uint32_t hard_block = (BMS_ERR_VOLTAGE | BMS_ERR_CURRENT | BMS_ERR_COMMS | BMS_ERR_TEMP);
+
+    // additional balancing logic
+    // BAL_IDLE: to turn off PWM -> S-Measure -> if needed sets PWM for BAL_ON_MS
+    // BAL_RUN: PWMs are running for BAL_ON_MS -> PWM off -> let voltages settle
+    // BAL_COOL: for BAL_OFF_MS cool down -> BAL_IDLE -> get S-measurements and evaluation
+    typedef enum { BAL_IDLE, BAL_RUN, BAL_COOL } bal_state_t;
+    static bal_state_t bal_state = BAL_IDLE;
+
+    static uint32_t t_run_end  = 0;   // end of 60 s window for balancing
+    static uint32_t t_cool_end = 0;   // end of 5 s cool-down
+    static uint32_t t_cfgb     = 0;   // next CFGB refresh during RUN
+
+    const uint32_t BAL_ON_MS        = 60000; // 60s run
+    const uint32_t BAL_OFF_MS       = 5000;  // 5s off to settle
+    const uint32_t CFGB_REFRESH_MS  = 500;   // keep DCTO alive during RUN
+
+
+    bool measuring_now = false; // for enabel/disable charging
+
+    if (enableBalancing)
     {
-        bms_wakeupChain();
-        bms_startBalancing(balancingThreshold);
+        if ((errs & hard_block) != 0) {
+            // -> PWM OFF and go idle
+            bms_wakeupChain();
+            bms_quickPwmOff_keepDcto();
+            bal_state = BAL_IDLE;
+        }
+        else
+        {
+            switch (bal_state)
+            {
+            case BAL_IDLE:
+                // Start evaluation, PWM off
+                bms_wakeupChain();
+                bms_quickPwmOff_keepDcto(); // ensure PWM = OFF
+                BMS_EnableCharging(false);
+                measuring_now = true;
+
+                bms_wakeupChain();
+                if ((status = bms_balancingMeasureVoltage())) return status; // clean S
+
+                measuring_now = false;
+
+                bms_wakeupChain();
+                bms_startBalancing(balancingThreshold); // set PWMs once for BAL_ON_MS
+
+                t_run_end = now + BAL_ON_MS;
+                t_cfgb    = now + CFGB_REFRESH_MS;
+                bal_state = BAL_RUN;
+                break;
+
+            case BAL_RUN:
+                // No re-calculation; just keep DCTO alive
+                if ((int32_t)(now - t_run_end) >= 0) {
+                    // Stop PWM and enter cool-down
+                    bms_wakeupChain();
+                    bms_quickPwmOff_keepDcto();    // PWMs OFF for all cells -> let voltages settle
+                    t_cool_end = now + BAL_OFF_MS;
+                    bal_state  = BAL_COOL;
+                } else if ((int32_t)(now - t_cfgb) >= 0) {
+                    bms_wakeupChain();
+                    bms_writeRegister(REG_CONFIG_B); // refresh DCTO -> PWMs unchanged
+                    t_cfgb += CFGB_REFRESH_MS;
+                }
+                break;
+
+            case BAL_COOL: // Do nothing for BAL_OFF_MS -> let pack settle
+
+                if ((int32_t)(now - t_cool_end) >= 0) {
+                    bal_state = BAL_IDLE; // After cool-down -> evaluate again
+                }
+                break;
+            }
+        }
     }
+    else
+    {
+        // Balancing disabled: PWM OFF; periodic S for monitoring
+        bms_wakeupChain();
+        bms_quickPwmOff_keepDcto();
+        bal_state = BAL_IDLE;
+
+        //  for S measurement when balancing is disabled
+        static uint32_t last_s_tick = 0;
+        const  uint32_t S_PERIOD_MS = 10000;
+
+        if ((int32_t)(now - last_s_tick) >= 0) {
+
+        	measuring_now = true;
+        	BMS_EnableCharging(false);
+            bms_wakeupChain();
+            (void)bms_balancingMeasureVoltage();       // ignore error here
+            measuring_now = false;
+            last_s_tick = now + S_PERIOD_MS;
+        }
+    }
+    //
+    bool balancing_active = (bal_state == BAL_RUN);
+    BMS_UpdateChargingControl(errs, balancing_active, measuring_now, now);
 
     bms_wakeupChain();
-    return status;
+    return BMS_OK;
 }
 
 
 
+void BMS_EnableCharging(bool enabled)
+{
+	static int last = -1;
+    chargerConfig.disable_charging = !enabled;
+
+    // Enable PC12 -> CHARGER_OUT
+    HAL_GPIO_WritePin(BMS_CHARGER_OUT_GPIO_Port, BMS_CHARGER_OUT_Pin, enabled ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    if (last!=(int)enabled)
+    {
+    	printfDma("[CHG] %s\n", enabled ? "ENABLED" : "DISABLED");
+    	last = (int)enabled;
+    }
+}
+
+static inline bool BMS_IsChargingPermitted(uint32_t errs, bool balancing_active, bool measuring_now)
+{
+    // check for balancing, errors and measuring
+    return (errs == BMS_OK) && !balancing_active && !measuring_now;
+}
+
+void BMS_UpdateChargingControl(uint32_t errs, bool balancing_active, bool measuring_now, uint32_t now_ms)
+{
+	static int last = -1;
+    static uint32_t t_enable_ok_until = 0;
+    const  uint32_t ENABLE_DELAY_MS   = 500;
+
+    bool allow = BMS_IsChargingPermitted(errs, balancing_active, measuring_now);
+
+    if (!allow) {
+        BMS_EnableCharging(false);  // disable charging
+        t_enable_ok_until = now_ms + ENABLE_DELAY_MS;  // delay for next enable
+        if (last != 0)
+        {
+        	printfDma("[CHG] blocked\n");
+            last = 0;
+        }
+    } else {
+        if ((int32_t)(now_ms - t_enable_ok_until) >= 0) {
+            BMS_EnableCharging(true);
+            if (last != 1)
+            {
+            	printfDma("[CHG] allowed\n");
+                last = 1;
+            }
+        }
+    }
+}
+
+
+static inline void BMS_SetFaultLed(bool on)
+{
+	static int last = -1;
+	HAL_GPIO_WritePin(BMS_FAULT_GPIO_Port, BMS_FAULT_Pin, on ? GPIO_PIN_RESET : GPIO_PIN_SET);
+    if (last != (int)on)
+    {
+    	printfDma("[LED] fault %s\n", on ? "ON" : " OFF");
+    	last = (int)on;
+    }
+}
 
 bool BMS_IsCharging(void)
 {
     return !chargerConfig.disable_charging;
 }
-
-
-void BMS_EnableCharging(bool enabled)
-{
-    chargerConfig.disable_charging = !enabled;   // Inverted logic because config is disable = 1
-
-    char *state = (chargerConfig.disable_charging)? "Disabled" : "Enabled";
-    printfDma("Charger Status: %s\n", state);
-}
-
-void BMS_ToggleBalancing(void)
-{
-    enableBalancing = !enableBalancing;
-}
-
-
-void BMS_EnableBalancing(bool enabled)
-{
-    enableBalancing = enabled;
-}
-
 
 void BMS_ChargingButtonLogic(void)
 {
@@ -1358,8 +1633,16 @@ void BMS_ChargingButtonLogic(void)
     }
 }
 
+void BMS_EnableBalancing(bool enabled)
+{
+    enableBalancing = enabled;
+}
 
-
+void BMS_ToggleBalancing(void)
+{
+    enableBalancing = !enableBalancing;
+    if (!enableBalancing) bms_stopDischarge();
+}
 
 void BMS_WriteFaultSignal(bool state)
 {
@@ -1373,7 +1656,3 @@ void BMS_WriteFaultSignal(bool state)
         currState = state;
     }
 }
-
-
-
-
